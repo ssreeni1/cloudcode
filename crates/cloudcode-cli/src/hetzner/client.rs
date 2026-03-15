@@ -75,6 +75,21 @@ struct GetServerResponse {
     server: ServerData,
 }
 
+pub fn estimate_monthly_cost(server_type: &str) -> Option<f64> {
+    match server_type {
+        "cx22" => Some(3.99),
+        "cx32" => Some(6.49),
+        "cx42" => Some(14.99),
+        "cx52" => Some(29.99),
+        "cpx11" => Some(3.99),
+        "cpx21" => Some(6.49),
+        "cpx31" => Some(12.49),
+        "cpx41" => Some(23.99),
+        "cpx51" => Some(44.99),
+        _ => None,
+    }
+}
+
 impl HetznerClient {
     pub fn new(api_token: String) -> Self {
         Self {
