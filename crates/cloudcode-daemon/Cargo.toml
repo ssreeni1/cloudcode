@@ -18,3 +18,4 @@ toml = { workspace = true }
 teloxide = { version = "0.13", features = ["macros"] }
 log = "0.4"
 env_logger = "0.11"
+regex = "1"

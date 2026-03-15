@@ -51,6 +51,11 @@ impl SessionMonitor {
 
         for session in sessions {
             if session.state == SessionState::Dead {
+                // Clean orphaned output files for dead sessions
+                let _ = tokio::process::Command::new("sh")
+                    .args(["-c", &format!("rm -f /tmp/cloudcode-{}-*.log", session.name)])
+                    .status()
+                    .await;
                 if self.manager.kill(&session.name).await.is_ok() {
                     cleaned.push(session.name);
                 }
