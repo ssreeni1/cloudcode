@@ -1,8 +1,10 @@
 use anyhow::Result;
+use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
 
 use crate::config::Config;
 use crate::hetzner::client::HetznerClient;
+use crate::ssh::tunnel::DaemonClient;
 use crate::state::VpsState;
 
 pub async fn run() -> Result<()> {
@@ -10,10 +12,7 @@ pub async fn run() -> Result<()> {
 
     if !state.is_provisioned() {
         println!("{}", "No VPS is currently provisioned.".yellow());
-        println!(
-            "Run {} to provision one.",
-            "cloudcode up".bold()
-        );
+        println!("Run {} to provision one.", "cloudcode up".bold());
         return Ok(());
     }
 
@@ -44,6 +43,44 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Query daemon status if VPS is provisioned
+    println!();
+    match DaemonClient::connect(&state, &config) {
+        Ok(daemon) => match daemon.request(&DaemonRequest::Status) {
+            Ok(DaemonResponse::Status {
+                uptime_secs,
+                sessions,
+            }) => {
+                println!("{}", "Daemon Status".bold().cyan());
+                println!("  Uptime:   {}", format_uptime(uptime_secs));
+                println!("  Sessions: {}", sessions.len());
+                for s in &sessions {
+                    println!(
+                        "    {} [{}]",
+                        s.name.green(),
+                        format!("{:?}", s.state).yellow()
+                    );
+                }
+            }
+            Ok(DaemonResponse::Error { message }) => {
+                println!("{} Daemon error: {}", "!".red(), message);
+            }
+            Ok(_) => {
+                println!("{} Unexpected daemon response", "!".yellow());
+            }
+            Err(e) => {
+                println!("{} Could not query daemon: {}", "!".yellow(), e);
+            }
+        },
+        Err(e) => {
+            println!(
+                "{} Could not connect to daemon: {}",
+                "!".yellow(),
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -53,5 +90,18 @@ fn colorize_status(status: &str) -> String {
         "initializing" | "starting" => status.yellow().to_string(),
         "off" | "stopping" => status.red().to_string(),
         _ => status.to_string(),
+    }
+}
+
+fn format_uptime(secs: u64) -> String {
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, seconds)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
     }
 }

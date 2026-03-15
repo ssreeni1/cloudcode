@@ -1,6 +1,31 @@
 use anyhow::Result;
+use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
+use colored::Colorize;
 
-pub async fn run(_session: String) -> Result<()> {
-    println!("Not yet implemented — requires daemon (Phase 2)");
+use crate::config::Config;
+use crate::ssh::tunnel::DaemonClient;
+use crate::state::VpsState;
+
+pub async fn run(session: String) -> Result<()> {
+    let config = Config::load()?;
+    let state = VpsState::load()?;
+    if !state.is_provisioned() {
+        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+    }
+
+    let client = DaemonClient::connect(&state, &config)?;
+    let response = client.request(&DaemonRequest::Kill {
+        session: session.clone(),
+    })?;
+
+    match response {
+        DaemonResponse::Killed { session } => {
+            println!("{} Session '{}' killed", "✓".green(), session);
+        }
+        DaemonResponse::Error { message } => {
+            eprintln!("{} {}", "Error:".red(), message);
+        }
+        _ => eprintln!("Unexpected response from daemon"),
+    }
     Ok(())
 }
