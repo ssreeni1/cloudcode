@@ -4,5 +4,6 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum AuthMethod {
     ApiKey { key: String },
+    #[serde(rename = "oauth")]
     OAuth { token: String },
 }

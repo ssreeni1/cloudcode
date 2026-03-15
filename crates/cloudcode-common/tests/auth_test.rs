@@ -48,7 +48,7 @@ fn oauth_tagged_format() {
     let json = serde_json::to_string(&auth).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(value["method"], "o_auth");
+    assert_eq!(value["method"], "oauth");
 }
 
 #[test]
