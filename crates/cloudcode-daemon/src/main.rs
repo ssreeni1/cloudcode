@@ -32,8 +32,13 @@ async fn main() -> Result<()> {
 
     let session_mgr = Arc::new(SessionManager::new());
 
-    // TODO Phase 4: Start telegram bot if configured
-    // if let Some(tg_config) = &config.telegram { ... }
+    if let Some(ref tg_config) = config.telegram {
+        let mgr = Arc::clone(&session_mgr);
+        let tg = tg_config.clone();
+        tokio::spawn(async move {
+            telegram::bot::run(&tg, mgr).await;
+        });
+    }
 
     api::server::run(&config.listen_addr, config.listen_port, session_mgr).await
 }

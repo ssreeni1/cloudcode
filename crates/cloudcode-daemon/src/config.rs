@@ -11,7 +11,7 @@ pub struct DaemonConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub owner_id: i64,
