@@ -3,7 +3,7 @@ use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
 
 use crate::config::Config;
-use crate::hetzner::client::HetznerClient;
+use crate::hetzner::client::{estimate_monthly_cost, HetznerClient};
 use crate::ssh::tunnel::DaemonClient;
 use crate::state::VpsState;
 
@@ -25,19 +25,48 @@ pub async fn run() -> Result<()> {
     let client = HetznerClient::new(hetzner_config.api_token.clone());
     let server_id = state.server_id.unwrap();
 
+    let vps_config = config.vps.as_ref();
+    let server_type = vps_config
+        .and_then(|v| v.server_type.as_deref())
+        .unwrap_or("cx22");
+    let location = vps_config
+        .and_then(|v| v.location.as_deref())
+        .unwrap_or("nbg1");
+
+    println!("{}", "cloudcode status".bold().cyan());
+    println!();
+
     match client.get_server(server_id).await {
         Ok(info) => {
-            println!("{}", "VPS Status".bold().cyan());
-            println!("  Name:   {}", info.name);
-            println!("  ID:     {}", info.id);
-            println!("  Status: {}", colorize_status(&info.status));
-            println!("  IP:     {}", info.ip);
+            println!(
+                "  {:<12} {} ({} in {})",
+                "VPS:".bold(),
+                colorize_status(&info.status),
+                server_type.dimmed(),
+                location.dimmed()
+            );
+            println!("  {:<12} {}", "IP:".bold(), info.ip);
+            println!("  {:<12} {}", "Server ID:".bold(), info.id);
+            println!("  {:<12} {}", "Name:".bold(), info.name);
+
+            if let Some(cost) = estimate_monthly_cost(server_type) {
+                println!(
+                    "  {:<12} {}",
+                    "Cost:".bold(),
+                    format!("~${:.2}/mo", cost).yellow()
+                );
+            }
         }
         Err(e) => {
-            println!("{}: {}", "Failed to query server status".red(), e);
-            println!("  Cached ID: {}", server_id);
             println!(
-                "  Cached IP: {}",
+                "  {} {}",
+                "✗".red().bold(),
+                format!("Failed to query server status: {e}").red()
+            );
+            println!("  {:<12} {}", "Server ID:".bold(), server_id);
+            println!(
+                "  {:<12} {}",
+                "IP:".bold(),
                 state.server_ip.as_deref().unwrap_or("unknown")
             );
         }
@@ -51,9 +80,21 @@ pub async fn run() -> Result<()> {
                 uptime_secs,
                 sessions,
             }) => {
-                println!("{}", "Daemon Status".bold().cyan());
-                println!("  Uptime:   {}", format_uptime(uptime_secs));
-                println!("  Sessions: {}", sessions.len());
+                println!(
+                    "  {:<12} {} (uptime: {})",
+                    "Daemon:".bold(),
+                    "connected".green(),
+                    format_uptime(uptime_secs).dimmed()
+                );
+                println!(
+                    "  {:<12} {}",
+                    "Sessions:".bold(),
+                    if sessions.is_empty() {
+                        "none".dimmed().to_string()
+                    } else {
+                        format!("{} active", sessions.len())
+                    }
+                );
                 for s in &sessions {
                     println!(
                         "    {} [{}]",
@@ -63,20 +104,35 @@ pub async fn run() -> Result<()> {
                 }
             }
             Ok(DaemonResponse::Error { message }) => {
-                println!("{} Daemon error: {}", "!".red(), message);
+                println!(
+                    "  {:<12} {} {}",
+                    "Daemon:".bold(),
+                    "error".red(),
+                    message.dimmed()
+                );
             }
             Ok(_) => {
-                println!("{} Unexpected daemon response", "!".yellow());
+                println!(
+                    "  {:<12} {}",
+                    "Daemon:".bold(),
+                    "unexpected response".yellow()
+                );
             }
             Err(e) => {
-                println!("{} Could not query daemon: {}", "!".yellow(), e);
+                println!(
+                    "  {:<12} {} ({})",
+                    "Daemon:".bold(),
+                    "unreachable".yellow(),
+                    format!("{e}").dimmed()
+                );
             }
         },
         Err(e) => {
             println!(
-                "{} Could not connect to daemon: {}",
-                "!".yellow(),
-                e
+                "  {:<12} {} ({})",
+                "Daemon:".bold(),
+                "disconnected".yellow(),
+                format!("{e}").dimmed()
             );
         }
     }
@@ -86,7 +142,7 @@ pub async fn run() -> Result<()> {
 
 fn colorize_status(status: &str) -> String {
     match status {
-        "running" => status.green().to_string(),
+        "running" => status.green().bold().to_string(),
         "initializing" | "starting" => status.yellow().to_string(),
         "off" | "stopping" => status.red().to_string(),
         _ => status.to_string(),
