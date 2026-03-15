@@ -1,5 +1,6 @@
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use crate::session::manager::SessionManager;
+use crate::session::monitor::SessionMonitor;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -39,6 +40,15 @@ pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonRespo
                 message: e.to_string(),
             },
         },
+        DaemonRequest::Cleanup => {
+            let monitor = SessionMonitor::new(SessionManager::new());
+            match monitor.cleanup_dead().await {
+                Ok(sessions) => DaemonResponse::CleanedUp { sessions },
+                Err(e) => DaemonResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
         DaemonRequest::Status => {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -32,6 +32,21 @@ async fn main() -> Result<()> {
 
     let session_mgr = Arc::new(SessionManager::new());
 
+    // Periodic session health check
+    let health_mgr = SessionManager::new();
+    tokio::spawn(async move {
+        let monitor = session::monitor::SessionMonitor::new(health_mgr);
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Ok(cleaned) = monitor.cleanup_dead().await {
+                for name in &cleaned {
+                    log::info!("Cleaned up dead session: {}", name);
+                }
+            }
+        }
+    });
+
     if let Some(ref tg_config) = config.telegram {
         let mgr = Arc::clone(&session_mgr);
         let tg = tg_config.clone();

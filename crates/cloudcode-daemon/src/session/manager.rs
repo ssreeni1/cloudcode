@@ -156,18 +156,23 @@ impl SessionManager {
 
     /// Wait for output to stabilize (Claude finished responding)
     async fn wait_for_output(&self, session: &str) -> Result<String> {
-        let mut last_output = String::new();
-        let mut stable_count = 0;
-        let max_wait = 120; // 120 seconds max
+        // Capture the initial state before we sent the message
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        for _ in 0..max_wait * 2 {
+        let mut last_output = self.capture(session).await?;
+        let mut stable_count = 0;
+        let max_iterations = 240; // 120 seconds max at 500ms intervals
+
+        for i in 0..max_iterations {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
             let current = self.capture(session).await?;
 
             if current == last_output {
                 stable_count += 1;
-                // Consider output stable after 3 consecutive identical captures (1.5 seconds)
-                if stable_count >= 3 {
+                // More patience early on (Claude might be thinking)
+                // After initial wait, consider stable after 3 consecutive matches
+                let threshold = if i < 10 { 6 } else { 3 };
+                if stable_count >= threshold {
                     return Ok(current);
                 }
             } else {

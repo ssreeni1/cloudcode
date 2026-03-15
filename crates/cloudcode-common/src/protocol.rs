@@ -10,6 +10,7 @@ pub enum DaemonRequest {
     Kill { session: String },
     Send { session: String, message: String },
     Status,
+    Cleanup,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,5 +21,6 @@ pub enum DaemonResponse {
     Killed { session: String },
     SendResult { output: String },
     Status { uptime_secs: u64, sessions: Vec<SessionInfo> },
+    CleanedUp { sessions: Vec<String> },
     Error { message: String },
 }
