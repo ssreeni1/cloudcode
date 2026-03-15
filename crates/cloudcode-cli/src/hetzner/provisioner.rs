@@ -6,12 +6,11 @@ use crate::hetzner::client::HetznerClient;
 use crate::state::VpsState;
 
 pub fn generate_cloud_init(ssh_pub_key: &str, claude_auth: &ClaudeConfig) -> String {
-    let api_key_env = if claude_auth.auth_method == "api_key" {
+    let api_key_lines = if claude_auth.auth_method == "api_key" {
         if let Some(ref key) = claude_auth.api_key {
             format!(
-                r#"
-  - echo 'export ANTHROPIC_API_KEY="{key}"' >> /home/claude/.bashrc
-  - echo 'export ANTHROPIC_API_KEY="{key}"' >> /home/claude/.profile"#,
+                r#"echo 'export ANTHROPIC_API_KEY="{key}"' >> /home/claude/.bashrc
+echo 'export ANTHROPIC_API_KEY="{key}"' >> /home/claude/.profile"#
             )
         } else {
             String::new()
@@ -21,7 +20,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, claude_auth: &ClaudeConfig) -> Str
     };
 
     format!(
-        r#"#cloud-config
+        r##"#cloud-config
 users:
   - name: claude
     groups: sudo
@@ -35,14 +34,61 @@ packages:
   - tmux
   - curl
   - jq
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - git
 
 runcmd:
-  - su - claude -c 'curl -fsSL https://claude.ai/install.sh | sh'{api_key_env}
-  - ufw default deny incoming
-  - ufw default allow outgoing
-  - ufw allow 22/tcp
-  - ufw --force enable
-"#
+  - |
+    exec > /var/log/cloudcode-setup.log 2>&1
+    set -euo pipefail
+
+    echo "=== cloudcode setup started at $(date) ==="
+
+    # Set API key environment
+    {api_key_lines}
+
+    # Install Claude Code with retries
+    CLAUDE_INSTALLED=false
+    for attempt in 1 2 3; do
+      echo "Claude Code install attempt $attempt..."
+      if su - claude -c 'curl -fsSL https://claude.ai/install.sh | sh'; then
+        CLAUDE_INSTALLED=true
+        break
+      fi
+      echo "Attempt $attempt failed, waiting 10s..."
+      sleep 10
+    done
+
+    if [ "$CLAUDE_INSTALLED" = false ]; then
+      echo '{{"status":"error","error":"Claude Code install failed after 3 attempts"}}' > /home/claude/.cloudcode-status.json
+      chown claude:claude /home/claude/.cloudcode-status.json
+      exit 1
+    fi
+
+    # Verify claude is available
+    if ! su - claude -c 'which claude'; then
+      echo '{{"status":"error","error":"claude binary not found after install"}}' > /home/claude/.cloudcode-status.json
+      chown claude:claude /home/claude/.cloudcode-status.json
+      exit 1
+    fi
+
+    # Install Rust toolchain for claude user
+    echo "Installing Rust toolchain..."
+    su - claude -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+
+    # Set up UFW
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow 22/tcp
+    ufw --force enable
+
+    # Write success marker
+    echo '{{"status":"ready"}}' > /home/claude/.cloudcode-status.json
+    chown claude:claude /home/claude/.cloudcode-status.json
+    echo "=== cloudcode setup completed at $(date) ==="
+"##
     )
 }
 

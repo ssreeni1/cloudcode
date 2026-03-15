@@ -1,9 +1,11 @@
 use anyhow::Result;
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::hetzner::client::{estimate_monthly_cost, HetznerClient};
+use crate::ssh::health::{self, CloudInitStatus};
 use crate::ssh::tunnel::DaemonClient;
 use crate::state::VpsState;
 
@@ -69,6 +71,40 @@ pub async fn run() -> Result<()> {
                 "IP:".bold(),
                 state.server_ip.as_deref().unwrap_or("unknown")
             );
+        }
+    }
+
+    // If state is initializing, check cloud-init status
+    if state.status.as_deref() == Some("initializing") {
+        println!();
+        println!("  {:<12} {}", "Setup:".bold(), "checking cloud-init...".yellow());
+        match health::wait_for_cloud_init(&state, Duration::from_secs(5)).await {
+            Ok(CloudInitStatus::Ready) => {
+                println!("  {:<12} {}", "Cloud-init:".bold(), "ready".green());
+            }
+            Ok(CloudInitStatus::Failed { error }) => {
+                println!(
+                    "  {:<12} {} ({})",
+                    "Cloud-init:".bold(),
+                    "failed".red(),
+                    error.dimmed()
+                );
+            }
+            Ok(CloudInitStatus::Running) => {
+                println!(
+                    "  {:<12} {}",
+                    "Cloud-init:".bold(),
+                    "still running...".yellow()
+                );
+            }
+            Err(e) => {
+                println!(
+                    "  {:<12} {} ({})",
+                    "Cloud-init:".bold(),
+                    "unknown".yellow(),
+                    format!("{e}").dimmed()
+                );
+            }
         }
     }
 

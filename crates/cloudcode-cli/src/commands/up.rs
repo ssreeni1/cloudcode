@@ -7,7 +7,11 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::hetzner::client::HetznerClient;
 use crate::hetzner::provisioner;
+use crate::ssh::connection::wait_for_ssh;
+use crate::ssh::health::{self, CloudInitStatus};
 use crate::state::VpsState;
+
+const TOTAL_STEPS: u8 = 13;
 
 fn step_bar(step: u8, total: u8, msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
@@ -45,7 +49,7 @@ fn fail_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
     pb.finish_with_message(msg.to_string());
 }
 
-pub async fn run() -> Result<()> {
+pub async fn run(no_wait: bool) -> Result<()> {
     let config = Config::load()?;
     let existing_state = VpsState::load()?;
 
@@ -80,10 +84,10 @@ pub async fn run() -> Result<()> {
     println!("{}", "cloudcode up".bold().cyan());
 
     // Step 1: Generate cloud-init config
-    let pb = step_bar(1, 5, "Generating cloud-init config...");
+    let pb = step_bar(1, TOTAL_STEPS, "Generating cloud-init config...");
     let ssh_pub_key_path = Config::ssh_pub_key_path()?;
     if !ssh_pub_key_path.exists() {
-        fail_step(&pb, 1, 5, "SSH public key not found");
+        fail_step(&pb, 1, TOTAL_STEPS, "SSH public key not found");
         bail!(
             "SSH public key not found at {}. Run `cloudcode init` first.",
             ssh_pub_key_path.display()
@@ -95,18 +99,18 @@ pub async fn run() -> Result<()> {
         .to_string();
     let cloud_init = provisioner::generate_cloud_init(&ssh_pub_key, claude_config);
     let _ = &cloud_init; // ensure it's used
-    finish_step(&pb, 1, 5, "Generating cloud-init config...");
+    finish_step(&pb, 1, TOTAL_STEPS, "Generated cloud-init config");
 
     // Step 2: Create SSH key in Hetzner
-    let pb = step_bar(2, 5, "Creating SSH key in Hetzner...");
+    let pb = step_bar(2, TOTAL_STEPS, "Creating SSH key in Hetzner...");
     let client = HetznerClient::new(hetzner_config.api_token.clone());
     let ssh_key_id = match client.create_ssh_key("cloudcode", &ssh_pub_key).await {
         Ok(id) => {
-            finish_step(&pb, 2, 5, "Creating SSH key in Hetzner...");
+            finish_step(&pb, 2, TOTAL_STEPS, "Created SSH key in Hetzner");
             id
         }
         Err(e) => {
-            fail_step(&pb, 2, 5, "Creating SSH key in Hetzner...");
+            fail_step(&pb, 2, TOTAL_STEPS, "Failed to create SSH key in Hetzner");
             return Err(e.context("Failed to register SSH key with Hetzner"));
         }
     };
@@ -114,19 +118,26 @@ pub async fn run() -> Result<()> {
     // Step 3: Provision server
     let pb = step_bar(
         3,
-        5,
+        TOTAL_STEPS,
         &format!("Provisioning server ({server_type} in {location})..."),
     );
     let (server_id, server_ip) = match client
-        .create_server("cloudcode", server_type, image, location, vec![ssh_key_id], &cloud_init)
+        .create_server(
+            "cloudcode",
+            server_type,
+            image,
+            location,
+            vec![ssh_key_id],
+            &cloud_init,
+        )
         .await
     {
         Ok(result) => {
             finish_step(
                 &pb,
                 3,
-                5,
-                &format!("Provisioning server ({server_type} in {location})..."),
+                TOTAL_STEPS,
+                &format!("Provisioned server ({server_type} in {location})"),
             );
             result
         }
@@ -134,42 +145,226 @@ pub async fn run() -> Result<()> {
             fail_step(
                 &pb,
                 3,
-                5,
-                &format!("Provisioning server ({server_type} in {location})..."),
+                TOTAL_STEPS,
+                &format!("Failed to provision server ({server_type} in {location})"),
             );
             return Err(e.context("Failed to create server"));
         }
     };
 
-    // Step 4: Waiting for server to be ready (report IP)
-    let pb = step_bar(4, 5, "Waiting for server to be ready...");
-    // The server is created but may still be initializing; we report IP immediately
-    finish_step(
-        &pb,
-        4,
-        5,
-        &format!("Waiting for server to be ready...  (IP: {})", server_ip.bold()),
-    );
-
-    // Step 5: Save state
-    let pb = step_bar(5, 5, "Saving state...");
-    let state = VpsState {
+    // Step 4: Save state early (so `down` works even if later steps fail)
+    let pb = step_bar(4, TOTAL_STEPS, "Saving state...");
+    let mut state = VpsState {
         server_id: Some(server_id),
-        server_ip: Some(server_ip),
+        server_ip: Some(server_ip.clone()),
         ssh_key_id: Some(ssh_key_id),
         status: Some("initializing".to_string()),
     };
     state.save()?;
-    finish_step(&pb, 5, 5, "Saving state...");
+    finish_step(
+        &pb,
+        4,
+        TOTAL_STEPS,
+        &format!("Saved state (IP: {})", server_ip.bold()),
+    );
+
+    // Step 5: Check no_wait flag
+    if no_wait {
+        println!(
+            "\n{}",
+            "VPS provisioned. Skipping cloud-init wait (--no-wait)."
+                .yellow()
+        );
+        println!(
+            "{}",
+            "Cloud-init is still running. Use `cloudcode status` to check progress."
+                .yellow()
+        );
+        return Ok(());
+    }
+
+    // Step 6: Wait for SSH connectivity
+    let pb = step_bar(6, TOTAL_STEPS, "Waiting for SSH connectivity...");
+    match wait_for_ssh(&state, Duration::from_secs(120)).await {
+        Ok(()) => {
+            finish_step(&pb, 6, TOTAL_STEPS, "SSH is reachable");
+        }
+        Err(e) => {
+            fail_step(&pb, 6, TOTAL_STEPS, "SSH connectivity timed out");
+            println!(
+                "\n{}: {}",
+                "Warning".yellow().bold(),
+                e
+            );
+            println!(
+                "{}",
+                "The server may still be starting. Try `cloudcode status` later.".yellow()
+            );
+            return Ok(());
+        }
+    }
+
+    // Step 7: Wait for cloud-init completion
+    let pb = step_bar(7, TOTAL_STEPS, "Waiting for cloud-init to complete...");
+    match health::wait_for_cloud_init(&state, Duration::from_secs(300)).await? {
+        CloudInitStatus::Ready => {
+            finish_step(&pb, 7, TOTAL_STEPS, "Cloud-init completed successfully");
+        }
+        CloudInitStatus::Failed { error } => {
+            fail_step(&pb, 7, TOTAL_STEPS, "Cloud-init failed");
+            println!(
+                "\n{}: {}",
+                "Error".red().bold(),
+                error
+            );
+            println!(
+                "{}",
+                "Check logs with: cloudcode ssh -- cat /var/log/cloudcode-setup.log".yellow()
+            );
+            state.status = Some("error".to_string());
+            state.save()?;
+            return Ok(());
+        }
+        CloudInitStatus::Running => {
+            fail_step(&pb, 7, TOTAL_STEPS, "Cloud-init still running (timed out)");
+            println!(
+                "\n{}",
+                "Cloud-init is still running. Use `cloudcode status` to check progress.".yellow()
+            );
+            return Ok(());
+        }
+    }
+
+    // Step 8: Verify installation
+    let pb = step_bar(8, TOTAL_STEPS, "Verifying installed software...");
+    match health::verify_installation(&state).await {
+        Ok(results) => {
+            let all_ok = results.iter().all(|(_, ok)| *ok);
+            if all_ok {
+                finish_step(&pb, 8, TOTAL_STEPS, "All software verified");
+            } else {
+                let missing: Vec<_> = results
+                    .iter()
+                    .filter(|(_, ok)| !ok)
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                fail_step(
+                    &pb,
+                    8,
+                    TOTAL_STEPS,
+                    &format!("Missing software: {}", missing.join(", ")),
+                );
+                println!(
+                    "\n{}: Some expected software is missing: {}",
+                    "Warning".yellow().bold(),
+                    missing.join(", ")
+                );
+            }
+        }
+        Err(e) => {
+            fail_step(&pb, 8, TOTAL_STEPS, "Failed to verify installation");
+            println!(
+                "\n{}: {}",
+                "Warning".yellow().bold(),
+                e
+            );
+        }
+    }
+
+    // Step 9: Upload source to VPS
+    let pb = step_bar(9, TOTAL_STEPS, "Uploading source to VPS...");
+    match crate::deploy::upload_source(&state) {
+        Ok(()) => {
+            finish_step(&pb, 9, TOTAL_STEPS, "Source uploaded to VPS");
+        }
+        Err(e) => {
+            fail_step(&pb, 9, TOTAL_STEPS, "Failed to upload source");
+            println!(
+                "\n{}: {}",
+                "Error".red().bold(),
+                e
+            );
+            state.status = Some("error".to_string());
+            state.save()?;
+            return Ok(());
+        }
+    }
+
+    // Step 10: Build daemon on VPS
+    let pb = step_bar(
+        10,
+        TOTAL_STEPS,
+        "Building daemon on VPS (this may take 3-5 minutes)...",
+    );
+    match crate::deploy::build_daemon(&state) {
+        Ok(()) => {
+            finish_step(&pb, 10, TOTAL_STEPS, "Daemon built successfully");
+        }
+        Err(e) => {
+            fail_step(&pb, 10, TOTAL_STEPS, "Daemon build failed");
+            println!(
+                "\n{}: {}",
+                "Error".red().bold(),
+                e
+            );
+            state.status = Some("error".to_string());
+            state.save()?;
+            return Ok(());
+        }
+    }
+
+    // Step 11: Install daemon + config + systemd
+    let pb = step_bar(11, TOTAL_STEPS, "Installing daemon service...");
+    match crate::deploy::install_daemon(&state, &config) {
+        Ok(()) => {
+            finish_step(&pb, 11, TOTAL_STEPS, "Daemon service installed");
+        }
+        Err(e) => {
+            fail_step(&pb, 11, TOTAL_STEPS, "Failed to install daemon service");
+            println!(
+                "\n{}: {}",
+                "Error".red().bold(),
+                e
+            );
+            state.status = Some("error".to_string());
+            state.save()?;
+            return Ok(());
+        }
+    }
+
+    // Step 12: Verify daemon is running
+    let pb = step_bar(12, TOTAL_STEPS, "Verifying daemon is running...");
+    match crate::deploy::verify_daemon(&state) {
+        Ok(()) => {
+            finish_step(&pb, 12, TOTAL_STEPS, "Daemon is running");
+        }
+        Err(e) => {
+            fail_step(&pb, 12, TOTAL_STEPS, "Daemon is not running");
+            println!(
+                "\n{}: {}",
+                "Warning".yellow().bold(),
+                e
+            );
+        }
+    }
+
+    // Step 13: Update state to running
+    let pb = step_bar(13, TOTAL_STEPS, "Finalizing...");
+    state.status = Some("running".to_string());
+    state.save()?;
+    finish_step(&pb, 13, TOTAL_STEPS, "State saved");
 
     println!(
         "\n{}",
-        "VPS provisioned successfully!".bold().green(),
+        "VPS provisioned and daemon deployed successfully!".bold().green(),
     );
     println!(
-        "{}",
-        "Cloud-init is setting up the server. It may take a few minutes to be fully ready."
-            .yellow()
+        "  Connect with: {}",
+        "cloudcode ssh".bold()
+    );
+    println!(
+        "  Check status: {}",
+        "cloudcode status".bold()
     );
 
     Ok(())

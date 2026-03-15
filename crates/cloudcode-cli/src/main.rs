@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod config;
+mod deploy;
 mod hetzner;
 mod ssh;
 mod state;
@@ -13,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Init { auto, reauth } => commands::init::run(auto, reauth).await,
-        Command::Up => commands::up::run().await,
+        Command::Up { no_wait } => commands::up::run(no_wait).await,
         Command::Down { force } => commands::down::run(force).await,
         Command::Status => commands::status::run().await,
         Command::Spawn { name } => commands::spawn::run(name).await,

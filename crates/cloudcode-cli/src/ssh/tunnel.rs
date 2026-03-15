@@ -1,55 +1,122 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::state::VpsState;
+use super::{ssh_base_args, daemon_socket_path};
 
 pub struct DaemonClient {
-    tunnel: Child,
-    local_port: u16,
+    tunnel: Option<Child>,
+    socket_path: PathBuf,
 }
 
 impl DaemonClient {
     /// Open SSH tunnel to daemon and return a client
     pub fn connect(state: &VpsState, _config: &Config) -> Result<Self> {
         let ip = state.server_ip.as_ref().context("No server IP")?;
-        let key_path = Config::ssh_key_path()?;
-        let local_port = 17700; // local forwarding port
+        let server_id = state.server_id.context("No server ID")?;
+        let socket_path = daemon_socket_path(server_id)?;
+
+        // Clean up stale socket
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Build SSH args
+        let mut args = ssh_base_args(ip)?;
+        args.extend([
+            "-N".to_string(), // no remote command
+            "-o".to_string(), "ExitOnForwardFailure=yes".to_string(),
+            "-L".to_string(), format!("{}:127.0.0.1:7700", socket_path.display()),
+            format!("claude@{}", ip),
+        ]);
 
         let tunnel = Command::new("ssh")
-            .args([
-                "-i",
-                &key_path.to_string_lossy(),
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-N", // no remote command
-                "-L",
-                &format!("{}:127.0.0.1:7700", local_port),
-                &format!("claude@{}", ip),
-            ])
+            .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .context("Failed to start SSH tunnel")?;
 
-        // Give tunnel time to establish
-        std::thread::sleep(Duration::from_secs(2));
+        let mut client = Self {
+            tunnel: Some(tunnel),
+            socket_path,
+        };
 
-        Ok(Self { tunnel, local_port })
+        // Wait for tunnel to be ready (probe socket)
+        client.wait_for_ready()?;
+
+        Ok(client)
     }
 
-    /// Send a request to the daemon and get a response
-    pub fn request(&self, req: &DaemonRequest) -> Result<DaemonResponse> {
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", self.local_port))
+    /// Poll until the Unix socket is connectable
+    fn wait_for_ready(&self) -> Result<()> {
+        let start = Instant::now();
+        let timeout = Duration::from_secs(10);
+        let interval = Duration::from_millis(100);
+
+        loop {
+            if UnixStream::connect(&self.socket_path).is_ok() {
+                return Ok(());
+            }
+
+            if start.elapsed() > timeout {
+                bail!(
+                    "SSH tunnel failed to establish within {}s. Is the VPS reachable?",
+                    timeout.as_secs()
+                );
+            }
+
+            std::thread::sleep(interval);
+        }
+    }
+
+    /// Send a request to the daemon with retry logic
+    pub fn request(&mut self, req: &DaemonRequest) -> Result<DaemonResponse> {
+        let delays = [0, 500, 1500]; // ms delays before each attempt
+        let mut last_error = None;
+
+        for (attempt, delay_ms) in delays.iter().enumerate() {
+            if *delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(*delay_ms));
+            }
+
+            // Check tunnel is alive before attempting
+            if attempt > 0 {
+                if let Err(e) = self.ensure_tunnel_alive() {
+                    last_error = Some(e);
+                    continue;
+                }
+            }
+
+            match self.try_request(req) {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // Only retry on transport errors, not application errors
+                    if err_str.contains("Connection refused")
+                        || err_str.contains("Connection reset")
+                        || err_str.contains("Broken pipe")
+                        || err_str.contains("connect to daemon")
+                    {
+                        last_error = Some(e);
+                        continue;
+                    }
+                    // Non-retryable error
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All retry attempts failed")))
+    }
+
+    fn try_request(&self, req: &DaemonRequest) -> Result<DaemonResponse> {
+        let mut stream = UnixStream::connect(&self.socket_path)
             .context("Failed to connect to daemon via tunnel")?;
         stream.set_read_timeout(Some(Duration::from_secs(180)))?;
 
@@ -64,11 +131,58 @@ impl DaemonClient {
 
         serde_json::from_str(&line).context("Failed to parse daemon response")
     }
+
+    fn ensure_tunnel_alive(&mut self) -> Result<()> {
+        // Check if we can connect to the socket
+        if UnixStream::connect(&self.socket_path).is_ok() {
+            return Ok(());
+        }
+
+        // Tunnel might be dead, try to restart
+        if let Some(ref mut child) = self.tunnel {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    // Process exited, need to restart
+                }
+                Ok(None) => {
+                    // Process still running but socket not connectable
+                    // Give it a moment
+                    std::thread::sleep(Duration::from_millis(500));
+                    if UnixStream::connect(&self.socket_path).is_ok() {
+                        return Ok(());
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Clean up and re-establish tunnel
+        self.cleanup_tunnel();
+
+        // Cannot easily reconnect without the original state.
+        bail!("SSH tunnel died and could not be re-established. Try running the command again.");
+    }
+
+    fn cleanup_tunnel(&mut self) {
+        if let Some(ref mut child) = self.tunnel {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.tunnel = None;
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
 }
 
 impl Drop for DaemonClient {
     fn drop(&mut self) {
-        let _ = self.tunnel.kill();
+        // With ControlMaster, we don't necessarily kill the master.
+        // But we should clean up the forwarding socket and our tunnel process.
+        // The ControlMaster will persist for ControlPersist=300 seconds.
+        if let Some(ref mut child) = self.tunnel {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
@@ -238,5 +352,14 @@ mod tests {
         let json_line = r#"{"type":"unknown_variant"}"#;
         let result = serde_json::from_str::<DaemonResponse>(json_line);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn daemon_socket_path_is_unique_per_server() {
+        let path1 = super::daemon_socket_path(123).unwrap();
+        let path2 = super::daemon_socket_path(456).unwrap();
+        assert_ne!(path1, path2);
+        assert!(path1.to_string_lossy().contains("123"));
+        assert!(path2.to_string_lossy().contains("456"));
     }
 }

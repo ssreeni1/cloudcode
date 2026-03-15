@@ -19,7 +19,11 @@ pub enum Command {
         reauth: bool,
     },
     /// Provision a Hetzner VPS
-    Up,
+    Up {
+        /// Don't wait for cloud-init to complete
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// Destroy the VPS
     Down {
         /// Skip confirmation prompt

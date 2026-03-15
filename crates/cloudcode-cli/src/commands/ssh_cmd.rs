@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
-
-use crate::config::Config;
 use crate::state::VpsState;
+use crate::ssh::ssh_base_args;
 
 pub async fn run(command: Vec<String>) -> Result<()> {
     let state = VpsState::load()?;
@@ -11,20 +10,8 @@ pub async fn run(command: Vec<String>) -> Result<()> {
     }
 
     let ip = state.server_ip.as_ref().context("No server IP in state")?;
-    let key_path = Config::ssh_key_path()?;
-
-    let mut args = vec![
-        "-t".to_string(),
-        "-i".to_string(),
-        key_path.to_string_lossy().to_string(),
-        "-o".to_string(),
-        "StrictHostKeyChecking=no".to_string(),
-        "-o".to_string(),
-        "UserKnownHostsFile=/dev/null".to_string(),
-        "-o".to_string(),
-        "LogLevel=ERROR".to_string(),
-        format!("claude@{}", ip),
-    ];
+    let mut args = ssh_base_args(ip)?;
+    args.extend(["-t".to_string(), format!("claude@{}", ip)]);
 
     if !command.is_empty() {
         args.extend(command);
