@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/cloudcode-common",
+    "crates/cloudcode-cli",
+    "crates/cloudcode-daemon",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+cloudcode-common = { path = "crates/cloudcode-common" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
