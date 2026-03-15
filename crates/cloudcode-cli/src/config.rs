@@ -79,3 +79,197 @@ impl Config {
         Ok(Self::dir()?.join("id_ed25519.pub"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_all_none() {
+        let config = Config::default();
+        assert!(config.hetzner.is_none());
+        assert!(config.claude.is_none());
+        assert!(config.telegram.is_none());
+        assert!(config.vps.is_none());
+    }
+
+    #[test]
+    fn default_config_toml_roundtrip() {
+        let config = Config::default();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+        assert!(deserialized.hetzner.is_none());
+        assert!(deserialized.claude.is_none());
+        assert!(deserialized.telegram.is_none());
+        assert!(deserialized.vps.is_none());
+    }
+
+    #[test]
+    fn full_config_toml_roundtrip() {
+        let config = Config {
+            hetzner: Some(HetznerConfig {
+                api_token: "hcloud-token-123".to_string(),
+            }),
+            claude: Some(ClaudeConfig {
+                auth_method: "api_key".to_string(),
+                api_key: Some("sk-ant-key".to_string()),
+                oauth_token: None,
+            }),
+            telegram: Some(TelegramConfig {
+                bot_token: "123456:ABC-DEF".to_string(),
+                owner_id: 987654321,
+            }),
+            vps: Some(VpsConfig {
+                server_type: Some("cx22".to_string()),
+                location: Some("fsn1".to_string()),
+                image: Some("ubuntu-24.04".to_string()),
+            }),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        let h = deserialized.hetzner.unwrap();
+        assert_eq!(h.api_token, "hcloud-token-123");
+
+        let c = deserialized.claude.unwrap();
+        assert_eq!(c.auth_method, "api_key");
+        assert_eq!(c.api_key, Some("sk-ant-key".to_string()));
+        assert!(c.oauth_token.is_none());
+
+        let t = deserialized.telegram.unwrap();
+        assert_eq!(t.bot_token, "123456:ABC-DEF");
+        assert_eq!(t.owner_id, 987654321);
+
+        let v = deserialized.vps.unwrap();
+        assert_eq!(v.server_type, Some("cx22".to_string()));
+        assert_eq!(v.location, Some("fsn1".to_string()));
+        assert_eq!(v.image, Some("ubuntu-24.04".to_string()));
+    }
+
+    #[test]
+    fn partial_config_only_hetzner() {
+        let config = Config {
+            hetzner: Some(HetznerConfig {
+                api_token: "token".to_string(),
+            }),
+            claude: None,
+            telegram: None,
+            vps: None,
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        assert!(deserialized.hetzner.is_some());
+        assert!(deserialized.claude.is_none());
+        assert!(deserialized.telegram.is_none());
+        assert!(deserialized.vps.is_none());
+    }
+
+    #[test]
+    fn partial_config_hetzner_and_vps_no_telegram() {
+        let config = Config {
+            hetzner: Some(HetznerConfig {
+                api_token: "tok".to_string(),
+            }),
+            claude: None,
+            telegram: None,
+            vps: Some(VpsConfig {
+                server_type: Some("cx22".to_string()),
+                location: None,
+                image: None,
+            }),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        assert!(deserialized.hetzner.is_some());
+        assert!(deserialized.telegram.is_none());
+        let v = deserialized.vps.unwrap();
+        assert_eq!(v.server_type, Some("cx22".to_string()));
+        assert!(v.location.is_none());
+        assert!(v.image.is_none());
+    }
+
+    #[test]
+    fn vps_config_all_none_fields() {
+        let config = Config {
+            hetzner: None,
+            claude: None,
+            telegram: None,
+            vps: Some(VpsConfig {
+                server_type: None,
+                location: None,
+                image: None,
+            }),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        let v = deserialized.vps.unwrap();
+        assert!(v.server_type.is_none());
+        assert!(v.location.is_none());
+        assert!(v.image.is_none());
+    }
+
+    #[test]
+    fn claude_config_oauth_method() {
+        let config = Config {
+            hetzner: None,
+            claude: Some(ClaudeConfig {
+                auth_method: "oauth".to_string(),
+                api_key: None,
+                oauth_token: Some("oauth-tok-xyz".to_string()),
+            }),
+            telegram: None,
+            vps: None,
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        let c = deserialized.claude.unwrap();
+        assert_eq!(c.auth_method, "oauth");
+        assert!(c.api_key.is_none());
+        assert_eq!(c.oauth_token, Some("oauth-tok-xyz".to_string()));
+    }
+
+    #[test]
+    fn deserialize_from_handwritten_toml() {
+        let toml_str = r#"
+[hetzner]
+api_token = "my-token"
+
+[telegram]
+bot_token = "bot123"
+owner_id = 42
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hetzner.unwrap().api_token, "my-token");
+        assert!(config.claude.is_none());
+        let t = config.telegram.unwrap();
+        assert_eq!(t.bot_token, "bot123");
+        assert_eq!(t.owner_id, 42);
+        assert!(config.vps.is_none());
+    }
+
+    #[test]
+    fn telegram_owner_id_negative() {
+        let config = Config {
+            hetzner: None,
+            claude: None,
+            telegram: Some(TelegramConfig {
+                bot_token: "tok".to_string(),
+                owner_id: -1,
+            }),
+            vps: None,
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(deserialized.telegram.unwrap().owner_id, -1);
+    }
+}
