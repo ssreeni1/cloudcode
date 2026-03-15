@@ -1,1 +1,11 @@
-// Placeholder — Agent 1 will implement
+pub const DAEMON_PORT: u16 = 7700;
+pub const DAEMON_HOST: &str = "127.0.0.1";
+pub const CONFIG_DIR_NAME: &str = ".cloudcode";
+pub const CONFIG_FILE_NAME: &str = "config.toml";
+pub const STATE_FILE_NAME: &str = "state.json";
+pub const DAEMON_CONFIG_PATH: &str = "/etc/cloudcode/daemon.toml";
+pub const SSH_KEY_NAME: &str = "id_ed25519";
+pub const DEFAULT_SERVER_TYPE: &str = "cx22";
+pub const DEFAULT_IMAGE: &str = "ubuntu-24.04";
+pub const DEFAULT_LOCATION: &str = "fsn1";
+pub const CLOUD_INIT_USER: &str = "claude";
