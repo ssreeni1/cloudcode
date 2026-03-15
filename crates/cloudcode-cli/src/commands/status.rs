@@ -111,7 +111,7 @@ pub async fn run() -> Result<()> {
     // Query daemon status if VPS is provisioned
     println!();
     match DaemonClient::connect(&state, &config) {
-        Ok(daemon) => match daemon.request(&DaemonRequest::Status) {
+        Ok(mut daemon) => match daemon.request(&DaemonRequest::Status) {
             Ok(DaemonResponse::Status {
                 uptime_secs,
                 sessions,

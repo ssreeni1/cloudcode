@@ -13,7 +13,7 @@ pub async fn run(name: Option<String>) -> Result<()> {
         anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
     }
 
-    let client = DaemonClient::connect(&state, &config)?;
+    let mut client = DaemonClient::connect(&state, &config)?;
     let response = client.request(&DaemonRequest::Spawn { name })?;
 
     match response {

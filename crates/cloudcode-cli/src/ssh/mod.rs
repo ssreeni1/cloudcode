@@ -2,13 +2,13 @@ pub mod connection;
 pub mod health;
 pub mod tunnel;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 use crate::config::Config;
 
 /// Return the base SSH args used by all SSH invocations.
 /// Includes key path, host key checking disabled, and ControlMaster config.
-pub fn ssh_base_args(ip: &str) -> Result<Vec<String>> {
+pub fn ssh_base_args(_ip: &str) -> Result<Vec<String>> {
     let key_path = Config::ssh_key_path()?;
     let control_path = control_socket_path()?;
 

@@ -14,7 +14,7 @@ pub async fn run(session: String, message: String) -> Result<()> {
     }
 
     println!("Sending to session '{}'...", session);
-    let client = DaemonClient::connect(&state, &config)?;
+    let mut client = DaemonClient::connect(&state, &config)?;
     let response = client.request(&DaemonRequest::Send { session, message })?;
 
     match response {

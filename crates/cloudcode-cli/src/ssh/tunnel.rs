@@ -42,7 +42,7 @@ impl DaemonClient {
             .spawn()
             .context("Failed to start SSH tunnel")?;
 
-        let mut client = Self {
+        let client = Self {
             tunnel: Some(tunnel),
             socket_path,
         };
