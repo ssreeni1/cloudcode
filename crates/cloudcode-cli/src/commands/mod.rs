@@ -5,5 +5,6 @@ pub mod kill;
 pub mod list;
 pub mod send;
 pub mod spawn;
+pub mod ssh_cmd;
 pub mod status;
 pub mod up;

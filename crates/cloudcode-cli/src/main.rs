@@ -21,5 +21,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Attach { session } => commands::attach::run(session).await,
         Command::Send { session, message } => commands::send::run(session, message).await,
         Command::Kill { session } => commands::kill::run(session).await,
+        Command::Ssh { command } => commands::ssh_cmd::run(command).await,
     }
 }

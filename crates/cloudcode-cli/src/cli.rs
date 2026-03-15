@@ -52,4 +52,10 @@ pub enum Command {
     },
     /// Show VPS and session status
     Status,
+    /// Raw SSH access to the VPS
+    Ssh {
+        /// Command to run (interactive shell if omitted)
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
