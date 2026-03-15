@@ -476,3 +476,261 @@ mod daemon_response {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Newline-delimited protocol integration tests
+// ---------------------------------------------------------------------------
+
+mod newline_delimited_protocol {
+    use super::*;
+
+    /// Helper: serialize a request to a newline-terminated wire format line
+    fn to_wire(req: &DaemonRequest) -> String {
+        let mut json = serde_json::to_string(req).unwrap();
+        json.push('\n');
+        json
+    }
+
+    /// Helper: serialize a response to a newline-terminated wire format line
+    fn resp_to_wire(resp: &DaemonResponse) -> String {
+        let mut json = serde_json::to_string(resp).unwrap();
+        json.push('\n');
+        json
+    }
+
+    // -----------------------------------------------------------------------
+    // Single message: serialize, add newline, strip newline, deserialize
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_survives_newline_delimited_roundtrip() {
+        let requests: Vec<DaemonRequest> = vec![
+            DaemonRequest::Spawn {
+                name: Some("sess-1".to_string()),
+            },
+            DaemonRequest::Spawn { name: None },
+            DaemonRequest::List,
+            DaemonRequest::Kill {
+                session: "s".to_string(),
+            },
+            DaemonRequest::Send {
+                session: "s".to_string(),
+                message: "msg".to_string(),
+            },
+            DaemonRequest::Status,
+        ];
+
+        for req in &requests {
+            let wire = to_wire(req);
+            // The wire format must end with exactly one newline
+            assert!(wire.ends_with('\n'));
+            assert!(!wire[..wire.len() - 1].contains('\n'));
+
+            // Strip newline and deserialize (simulates BufReader::read_line then trim)
+            let line = wire.trim_end_matches('\n');
+            let _: DaemonRequest = serde_json::from_str(line).unwrap();
+        }
+    }
+
+    #[test]
+    fn response_survives_newline_delimited_roundtrip() {
+        let sample = SessionInfo {
+            name: "s".to_string(),
+            state: SessionState::Running,
+            created_at: 100,
+            last_activity: 200,
+        };
+
+        let responses: Vec<DaemonResponse> = vec![
+            DaemonResponse::Spawned {
+                session: sample.clone(),
+            },
+            DaemonResponse::Sessions {
+                sessions: vec![sample.clone()],
+            },
+            DaemonResponse::Killed {
+                session: "s".to_string(),
+            },
+            DaemonResponse::SendResult {
+                output: "ok".to_string(),
+            },
+            DaemonResponse::Status {
+                uptime_secs: 60,
+                sessions: vec![],
+            },
+            DaemonResponse::Error {
+                message: "fail".to_string(),
+            },
+        ];
+
+        for resp in &responses {
+            let wire = resp_to_wire(resp);
+            assert!(wire.ends_with('\n'));
+            assert!(!wire[..wire.len() - 1].contains('\n'));
+
+            let line = wire.trim_end_matches('\n');
+            let _: DaemonResponse = serde_json::from_str(line).unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multiple messages in sequence (simulating a TCP stream)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_requests_in_stream_can_be_split_and_deserialized() {
+        let requests = vec![
+            DaemonRequest::List,
+            DaemonRequest::Spawn {
+                name: Some("a".to_string()),
+            },
+            DaemonRequest::Send {
+                session: "a".to_string(),
+                message: "hello".to_string(),
+            },
+            DaemonRequest::Kill {
+                session: "a".to_string(),
+            },
+            DaemonRequest::Status,
+        ];
+
+        // Build a single byte stream of newline-delimited messages
+        let stream: String = requests.iter().map(|r| to_wire(r)).collect();
+
+        // Split on newlines and deserialize each (simulates BufReader::lines)
+        let deserialized: Vec<DaemonRequest> = stream
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(deserialized.len(), requests.len());
+
+        // Verify the types match in order
+        assert!(matches!(deserialized[0], DaemonRequest::List));
+        assert!(matches!(deserialized[1], DaemonRequest::Spawn { .. }));
+        assert!(matches!(deserialized[2], DaemonRequest::Send { .. }));
+        assert!(matches!(deserialized[3], DaemonRequest::Kill { .. }));
+        assert!(matches!(deserialized[4], DaemonRequest::Status));
+    }
+
+    #[test]
+    fn multiple_responses_in_stream_can_be_split_and_deserialized() {
+        let sample = SessionInfo {
+            name: "x".to_string(),
+            state: SessionState::Idle,
+            created_at: 0,
+            last_activity: 0,
+        };
+
+        let responses = vec![
+            DaemonResponse::Sessions { sessions: vec![] },
+            DaemonResponse::Spawned {
+                session: sample.clone(),
+            },
+            DaemonResponse::SendResult {
+                output: "done".to_string(),
+            },
+            DaemonResponse::Killed {
+                session: "x".to_string(),
+            },
+            DaemonResponse::Error {
+                message: "oops".to_string(),
+            },
+        ];
+
+        let stream: String = responses.iter().map(|r| resp_to_wire(r)).collect();
+
+        let deserialized: Vec<DaemonResponse> = stream
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(deserialized.len(), responses.len());
+
+        assert!(matches!(deserialized[0], DaemonResponse::Sessions { .. }));
+        assert!(matches!(deserialized[1], DaemonResponse::Spawned { .. }));
+        assert!(matches!(
+            deserialized[2],
+            DaemonResponse::SendResult { .. }
+        ));
+        assert!(matches!(deserialized[3], DaemonResponse::Killed { .. }));
+        assert!(matches!(deserialized[4], DaemonResponse::Error { .. }));
+    }
+
+    #[test]
+    fn interleaved_request_response_pairs_in_stream() {
+        // Simulate a conversation: request line followed by response line
+        let req1 = DaemonRequest::List;
+        let resp1 = DaemonResponse::Sessions { sessions: vec![] };
+        let req2 = DaemonRequest::Spawn {
+            name: Some("s".to_string()),
+        };
+        let resp2 = DaemonResponse::Spawned {
+            session: SessionInfo {
+                name: "s".to_string(),
+                state: SessionState::Running,
+                created_at: 1,
+                last_activity: 1,
+            },
+        };
+
+        let mut stream = String::new();
+        stream.push_str(&to_wire(&req1));
+        stream.push_str(&resp_to_wire(&resp1));
+        stream.push_str(&to_wire(&req2));
+        stream.push_str(&resp_to_wire(&resp2));
+
+        let lines: Vec<&str> = stream.lines().collect();
+        assert_eq!(lines.len(), 4);
+
+        // Odd indices are requests, even are responses (0-indexed: 0,2 = req; 1,3 = resp)
+        let _: DaemonRequest = serde_json::from_str(lines[0]).unwrap();
+        let _: DaemonResponse = serde_json::from_str(lines[1]).unwrap();
+        let _: DaemonRequest = serde_json::from_str(lines[2]).unwrap();
+        let _: DaemonResponse = serde_json::from_str(lines[3]).unwrap();
+    }
+
+    #[test]
+    fn empty_stream_produces_no_messages() {
+        let stream = "";
+        let messages: Vec<&str> = stream.lines().filter(|l| !l.is_empty()).collect();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn stream_with_only_newlines_produces_no_valid_messages() {
+        let stream = "\n\n\n";
+        let messages: Vec<&str> = stream.lines().filter(|l| !l.is_empty()).collect();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn message_with_embedded_newlines_in_payload_does_not_break_framing() {
+        // A Send message whose payload contains newline characters.
+        // The JSON serializer must escape them so the wire line is still one line.
+        let req = DaemonRequest::Send {
+            session: "s".to_string(),
+            message: "first\nsecond\nthird".to_string(),
+        };
+        let wire = to_wire(&req);
+
+        // The wire should be exactly one newline-terminated line
+        let line_count = wire.matches('\n').count();
+        assert_eq!(
+            line_count, 1,
+            "Wire format should have exactly one newline (the delimiter), got {}",
+            line_count
+        );
+
+        let deserialized: DaemonRequest =
+            serde_json::from_str(wire.trim_end_matches('\n')).unwrap();
+        match deserialized {
+            DaemonRequest::Send { message, .. } => {
+                assert_eq!(message, "first\nsecond\nthird");
+            }
+            other => panic!("Expected Send, got {:?}", other),
+        }
+    }
+}
