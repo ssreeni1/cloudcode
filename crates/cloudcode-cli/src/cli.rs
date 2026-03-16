@@ -6,14 +6,17 @@ use clap::{Parser, Subcommand};
     about = "Persistent cloud Claude Code sessions",
     version,
     after_help = r#"Quick start:
-  1. cloudcode init          # Configure Hetzner + Claude + Telegram
-  2. cloudcode up            # Provision VPS (~5-10 min)
-  3. cloudcode spawn         # Create a Claude Code session
-  4. cloudcode open <name>    # Connect interactively"#
+  cloudcode              # Launch interactive TUI
+  cloudcode init         # Run setup wizard
+  cloudcode up           # Provision VPS
+  cloudcode spawn        # Create a Claude Code session
+  cloudcode open <name>  # Connect interactively
+
+Run `cloudcode` with no arguments for the full TUI experience."#
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -26,6 +29,9 @@ pub enum Command {
         /// Re-authenticate only
         #[arg(long)]
         reauth: bool,
+        /// Use classic (non-TUI) interactive prompts
+        #[arg(long)]
+        classic: bool,
     },
     /// Provision a Hetzner VPS
     Up {
