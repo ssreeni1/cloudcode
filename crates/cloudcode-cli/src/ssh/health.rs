@@ -92,7 +92,7 @@ pub async fn verify_installation(state: &VpsState) -> Result<Vec<(String, bool)>
             "-o",
             "ConnectTimeout=10",
             &format!("claude@{}", ip),
-            "echo tmux:$(which tmux >/dev/null 2>&1 && echo ok || echo missing); echo claude:$(which claude >/dev/null 2>&1 && echo ok || echo missing); echo cargo:$(which cargo >/dev/null 2>&1 || . $HOME/.cargo/env 2>/dev/null && which cargo >/dev/null 2>&1 && echo ok || echo missing)",
+            "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; echo tmux:$(which tmux >/dev/null 2>&1 && echo ok || echo missing); echo claude:$(which claude >/dev/null 2>&1 && echo ok || echo missing); echo cargo:$(which cargo >/dev/null 2>&1 && echo ok || echo missing)",
         ])
         .output()
         .context("Failed to run verification")?;

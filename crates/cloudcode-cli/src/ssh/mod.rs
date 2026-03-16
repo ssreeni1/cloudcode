@@ -2,7 +2,7 @@ pub mod connection;
 pub mod health;
 pub mod tunnel;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use crate::config::Config;
 
@@ -33,5 +33,8 @@ pub fn control_socket_path() -> Result<PathBuf> {
 
 /// Path to the daemon forwarding socket for a given server
 pub fn daemon_socket_path(server_id: u64) -> Result<PathBuf> {
-    Ok(PathBuf::from(format!("/tmp/cloudcode-daemon-{}.sock", server_id)))
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    let dir = home.join(".cloudcode").join("sockets");
+    std::fs::create_dir_all(&dir).context("Failed to create sockets directory")?;
+    Ok(dir.join(format!("daemon-{}.sock", server_id)))
 }

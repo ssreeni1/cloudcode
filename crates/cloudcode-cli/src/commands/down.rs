@@ -57,15 +57,46 @@ pub async fn run(force: bool) -> Result<()> {
     pb.set_message("Destroying VPS...");
     pb.enable_steady_tick(Duration::from_millis(80));
 
-    provisioner::deprovision(&state, &config).await?;
-    VpsState::clear()?;
-
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!("  {} {{msg}}", "✓".green()))
-            .expect("invalid template"),
-    );
-    pb.finish_with_message(format!("{}", "VPS destroyed successfully.".green()));
+    match provisioner::deprovision(&state, &config).await {
+        Ok(()) => {
+            VpsState::clear()?;
+            pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template(&format!("  {} {{msg}}", "✓".green()))
+                    .expect("invalid template"),
+            );
+            pb.finish_with_message(format!("{}", "VPS destroyed successfully.".green()));
+        }
+        Err(e) => {
+            let err_msg = format!("{e}");
+            // Check for 404 (server not found on Hetzner)
+            if err_msg.contains("HTTP 404") || err_msg.contains("404") {
+                pb.finish_and_clear();
+                println!(
+                    "\n  {} {}",
+                    "!".yellow().bold(),
+                    "Server not found on Hetzner.".yellow()
+                );
+                println!("  Clear local state? [y/N]");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let trimmed = input.trim();
+                if trimmed.eq_ignore_ascii_case("y") {
+                    VpsState::clear()?;
+                    println!(
+                        "  {} {}",
+                        "✓".green(),
+                        "Local state cleared.".green()
+                    );
+                } else {
+                    println!("  {}", "Aborted. Local state preserved.".yellow());
+                }
+            } else {
+                pb.finish_and_clear();
+                return Err(e);
+            }
+        }
+    }
 
     Ok(())
 }

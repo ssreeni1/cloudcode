@@ -73,13 +73,34 @@ pub async fn run(no_wait: bool) -> Result<()> {
     let vps_config = config.vps.as_ref();
     let server_type = vps_config
         .and_then(|v| v.server_type.as_deref())
-        .unwrap_or("cx22");
+        .unwrap_or("cx23");
     let location = vps_config
         .and_then(|v| v.location.as_deref())
         .unwrap_or("nbg1");
     let image = vps_config
         .and_then(|v| v.image.as_deref())
         .unwrap_or("ubuntu-24.04");
+
+    // Cost confirmation prompt (skip if not a TTY)
+    {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() {
+            let cost_str = crate::hetzner::client::estimate_monthly_cost(server_type)
+                .map(|c| format!("~${:.2}/mo", c))
+                .unwrap_or_else(|| "unknown cost".to_string());
+            println!(
+                "This will provision a {} server at {} on Hetzner. Continue? [Y/n]",
+                server_type, cost_str
+            );
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let trimmed = input.trim();
+            if trimmed.eq_ignore_ascii_case("n") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        }
+    }
 
     println!("{}", "cloudcode up".bold().cyan());
 
@@ -206,7 +227,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
 
     // Step 7: Wait for cloud-init completion
     let pb = step_bar(7, TOTAL_STEPS, "Waiting for cloud-init to complete...");
-    match health::wait_for_cloud_init(&state, Duration::from_secs(300)).await? {
+    match health::wait_for_cloud_init(&state, Duration::from_secs(600)).await? {
         CloudInitStatus::Ready => {
             finish_step(&pb, 7, TOTAL_STEPS, "Cloud-init completed successfully");
         }

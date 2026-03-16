@@ -1,3 +1,5 @@
+use std::io::{IsTerminal, Write};
+
 use anyhow::Result;
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
@@ -13,13 +15,29 @@ pub async fn run(name: Option<String>) -> Result<()> {
         anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
     }
 
+    // If no name provided and running in a TTY, prompt the user
+    let name = if name.is_none() && std::io::stdout().is_terminal() {
+        print!("Session name (leave empty for auto-generated): ");
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else {
+        name
+    };
+
     let mut client = DaemonClient::connect(&state, &config)?;
     let response = client.request(&DaemonRequest::Spawn { name })?;
 
     match response {
         DaemonResponse::Spawned { session } => {
             println!("{} Session '{}' created", "✓".green(), session.name);
-            println!("  Attach with: cloudcode attach {}", session.name);
+            println!("  Open with: cloudcode open {}", session.name);
         }
         DaemonResponse::Error { message } => {
             eprintln!("{} {}", "Error:".red(), message);

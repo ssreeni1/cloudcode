@@ -32,7 +32,16 @@ impl VpsState {
             fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)?;
+        // Write to a tmp file first, then atomically rename to prevent corruption
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, content)?;
+        fs::rename(&tmp_path, &path).context("Failed to atomically replace state.json")?;
+        // Set 0600 permissions on the final file
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 

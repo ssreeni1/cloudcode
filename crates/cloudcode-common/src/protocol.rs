@@ -19,7 +19,11 @@ pub enum DaemonResponse {
     Spawned { session: SessionInfo },
     Sessions { sessions: Vec<SessionInfo> },
     Killed { session: String },
-    SendResult { output: String },
+    SendResult {
+        output: String,
+        #[serde(default)]
+        files: Vec<String>,
+    },
     Status { uptime_secs: u64, sessions: Vec<SessionInfo> },
     CleanedUp { sessions: Vec<String> },
     Error { message: String },

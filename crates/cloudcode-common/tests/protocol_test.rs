@@ -334,12 +334,16 @@ mod daemon_response {
     fn send_result_roundtrip() {
         let resp = DaemonResponse::SendResult {
             output: "result text".to_string(),
+            files: vec!["screenshot.png".to_string()],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
 
         match deserialized {
-            DaemonResponse::SendResult { output } => assert_eq!(output, "result text"),
+            DaemonResponse::SendResult { output, files } => {
+                assert_eq!(output, "result text");
+                assert_eq!(files, vec!["screenshot.png"]);
+            }
             other => panic!("Expected SendResult, got {:?}", other),
         }
     }
@@ -348,6 +352,7 @@ mod daemon_response {
     fn send_result_tagged_format() {
         let resp = DaemonResponse::SendResult {
             output: "ok".to_string(),
+            files: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -553,6 +558,7 @@ mod newline_delimited_protocol {
             },
             DaemonResponse::SendResult {
                 output: "ok".to_string(),
+                files: vec![],
             },
             DaemonResponse::Status {
                 uptime_secs: 60,
@@ -630,6 +636,7 @@ mod newline_delimited_protocol {
             },
             DaemonResponse::SendResult {
                 output: "done".to_string(),
+                files: vec![],
             },
             DaemonResponse::Killed {
                 session: "x".to_string(),

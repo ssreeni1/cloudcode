@@ -110,24 +110,18 @@ pub fn install_daemon(state: &VpsState, config: &crate::config::Config) -> Resul
         ));
     }
 
-    // Build the API key environment line for systemd
-    let api_key_env = if let Some(ref claude) = config.claude {
+    // Build the secrets env file content
+    let mut env_file_content = String::new();
+    if let Some(ref claude) = config.claude {
         if claude.auth_method == "api_key" {
             if let Some(ref key) = claude.api_key {
-                format!("Environment=ANTHROPIC_API_KEY={}", key)
-            } else {
-                String::new()
+                env_file_content.push_str(&format!("ANTHROPIC_API_KEY={}\n", key));
             }
-        } else {
-            String::new()
         }
-    } else {
-        String::new()
-    };
+    }
 
     // Generate systemd unit
-    let unit = format!(
-        r#"[Unit]
+    let unit = r#"[Unit]
 Description=cloudcode daemon
 After=network.target
 
@@ -138,13 +132,16 @@ ExecStart=/usr/local/bin/cloudcode-daemon /etc/cloudcode/daemon.toml
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
-{api_key_env}
+EnvironmentFile=/home/claude/.cloudcode-env
 WorkingDirectory=/home/claude
+ProtectSystem=strict
+PrivateTmp=false
+NoNewPrivileges=true
+ReadWritePaths=/home/claude /tmp
 
 [Install]
 WantedBy=multi-user.target
-"#
-    );
+"#;
 
     // Run install commands via SSH
     let install_script = format!(
@@ -155,6 +152,13 @@ sudo mkdir -p /etc/cloudcode
 cat << 'DAEMON_TOML' | sudo tee /etc/cloudcode/daemon.toml > /dev/null
 {daemon_toml}
 DAEMON_TOML
+sudo chown claude:claude /etc/cloudcode/daemon.toml
+sudo chmod 0600 /etc/cloudcode/daemon.toml
+cat << 'ENV_FILE' > /home/claude/.cloudcode-env
+{env_file_content}
+ENV_FILE
+chown claude:claude /home/claude/.cloudcode-env
+chmod 0600 /home/claude/.cloudcode-env
 cat << 'UNIT_FILE' | sudo tee /etc/systemd/system/cloudcode-daemon.service > /dev/null
 {unit}
 UNIT_FILE

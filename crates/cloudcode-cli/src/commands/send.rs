@@ -18,8 +18,14 @@ pub async fn run(session: String, message: String) -> Result<()> {
     let response = client.request(&DaemonRequest::Send { session, message })?;
 
     match response {
-        DaemonResponse::SendResult { output } => {
+        DaemonResponse::SendResult { output, files } => {
             println!("{}", output);
+            if !files.is_empty() {
+                println!("\n{}", "Files created:".dimmed());
+                for f in &files {
+                    println!("  {}", f);
+                }
+            }
         }
         DaemonResponse::Error { message } => {
             eprintln!("{} {}", "Error:".red(), message);

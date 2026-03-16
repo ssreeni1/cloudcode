@@ -1,7 +1,16 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "cloudcode", about = "Persistent cloud Claude Code sessions")]
+#[command(
+    name = "cloudcode",
+    about = "Persistent cloud Claude Code sessions",
+    version,
+    after_help = r#"Quick start:
+  1. cloudcode init          # Configure Hetzner + Claude + Telegram
+  2. cloudcode up            # Provision VPS (~5-10 min)
+  3. cloudcode spawn         # Create a Claude Code session
+  4. cloudcode open <name>    # Connect interactively"#
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -37,8 +46,9 @@ pub enum Command {
     },
     /// List active sessions
     List,
-    /// Attach to a session (interactive PTY)
-    Attach {
+    /// Open a session interactively
+    #[command(alias = "attach")]
+    Open {
         /// Session name
         session: String,
     },
@@ -56,6 +66,13 @@ pub enum Command {
     },
     /// Show VPS and session status
     Status,
+    /// Restart the cloudcode daemon on the VPS
+    Restart,
+    /// View logs from the VPS
+    Logs {
+        /// Log target: "setup" (default) or "daemon"
+        target: Option<String>,
+    },
     /// Raw SSH access to the VPS
     Ssh {
         /// Command to run (interactive shell if omitted)

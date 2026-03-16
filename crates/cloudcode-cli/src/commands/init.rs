@@ -15,7 +15,36 @@ fn mask_secret(s: &str) -> String {
     }
 }
 
+/// Check that required CLI tools (ssh, rsync, ssh-keygen) are available on PATH.
+fn check_required_tools() -> Result<()> {
+    let tools = ["ssh", "rsync", "ssh-keygen"];
+    let mut missing = Vec::new();
+
+    for tool in &tools {
+        let result = ProcessCommand::new("which")
+            .arg(tool)
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {}
+            _ => missing.push(*tool),
+        }
+    }
+
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Required tool(s) not found: {}. Please install them before running cloudcode init.",
+            missing.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn run(auto: bool, reauth: bool) -> Result<()> {
+    // Check required tools are available
+    check_required_tools()?;
+
     println!(
         "\n{}",
         "Welcome to cloudcode setup!".bold().cyan()
@@ -31,6 +60,23 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
 
     let mut config = Config::load()?;
 
+    // Init re-run protection: if config already has hetzner + claude and --reauth is not set, confirm overwrite
+    if !reauth && config.hetzner.is_some() && config.claude.is_some() {
+        print!(
+            "  {} ",
+            "Configuration already exists. Overwrite? [y/N]".yellow()
+        );
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        let answer = answer.trim().to_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("  {}", "Exiting without changes.".dimmed());
+            return Ok(());
+        }
+    }
+
     if reauth {
         println!("  {}", "Re-authentication mode.".yellow());
     }
@@ -45,8 +91,11 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             .interact()?;
 
         if !has_account {
+            let url = "https://console.hetzner.cloud/";
             println!("  {}", "Opening Hetzner Cloud signup...".cyan());
-            let _ = open::that("https://console.hetzner.cloud/");
+            if open::that(url).is_err() {
+                println!("  {} {}", "→".dimmed(), url.dimmed());
+            }
             println!(
                 "  {}",
                 "Create an account and come back when you have an API token."
@@ -54,6 +103,11 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             );
         }
 
+        println!(
+            "  {}",
+            "Create a token with Read & Write access at console.hetzner.cloud → Security → API Tokens"
+                .dimmed()
+        );
         let api_token: String = Input::new()
             .with_prompt("Enter your Hetzner API token")
             .interact_text()?;
@@ -81,7 +135,15 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     if !reauth || config.claude.is_none() {
         println!("\n{}", "Step 2: Claude Authentication".bold().cyan());
 
-        let auth_options = vec!["API Key", "OAuth Token"];
+        println!(
+            "  {}",
+            "API key: paste a key from console.anthropic.com (simpler)".dimmed()
+        );
+        println!(
+            "  {}",
+            "OAuth: log in via claude.ai after provisioning (no key needed now)".dimmed()
+        );
+        let auth_options = vec!["API Key", "OAuth (log in later on VPS)"];
         let auth_selection = Select::new()
             .with_prompt("How would you like to authenticate with Claude?")
             .items(&auth_options)
@@ -90,6 +152,14 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
 
         let claude_config = match auth_selection {
             0 => {
+                let url = "https://console.anthropic.com/settings/keys";
+                println!(
+                    "  {}",
+                    "Opening Anthropic Console...".cyan()
+                );
+                if open::that(url).is_err() {
+                    println!("  {} {}", "→".dimmed(), url.dimmed());
+                }
                 let api_key: String = Input::new()
                     .with_prompt("Enter your Anthropic API key")
                     .interact_text()?;
@@ -105,18 +175,22 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 }
             }
             1 => {
-                let oauth_token: String = Input::new()
-                    .with_prompt("Enter your OAuth token")
-                    .interact_text()?;
                 println!(
-                    "  {} OAuth token saved ({})",
+                    "  {} OAuth selected. After `cloudcode up`, run:",
                     "✓".green().bold(),
-                    mask_secret(&oauth_token).dimmed()
+                );
+                println!(
+                    "    {}",
+                    "cloudcode open <session>".bold()
+                );
+                println!(
+                    "  {}",
+                    "Claude Code will prompt you to log in on first launch.".dimmed()
                 );
                 ClaudeConfig {
                     auth_method: "oauth".to_string(),
                     api_key: None,
-                    oauth_token: Some(oauth_token),
+                    oauth_token: None,
                 }
             }
             _ => unreachable!(),
@@ -135,9 +209,17 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             .interact()?;
 
         if setup_telegram {
+            println!(
+                "  {}",
+                "Create a bot via @BotFather on Telegram: send /newbot and follow the prompts.".dimmed()
+            );
             let bot_token: String = Input::new()
                 .with_prompt("Enter your Telegram bot token")
                 .interact_text()?;
+            println!(
+                "  {}",
+                "Send /start to @userinfobot on Telegram to find your numeric user ID.".dimmed()
+            );
             let owner_id: i64 = Input::new()
                 .with_prompt("Enter your Telegram user ID")
                 .interact_text()?;
@@ -152,6 +234,23 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 bot_token,
                 owner_id,
             });
+
+            println!(
+                "\n  {}",
+                "How to use Telegram with cloudcode:".bold()
+            );
+            println!(
+                "  {}",
+                "After running `cloudcode up`, message your bot on Telegram.".dimmed()
+            );
+            println!(
+                "  {}",
+                "Send /spawn to create a session, then type messages to interact with Claude.".dimmed()
+            );
+            println!(
+                "  {}",
+                "Send /help in the bot chat for all available commands.".dimmed()
+            );
         } else {
             println!("  {} Skipped", "−".dimmed());
         }

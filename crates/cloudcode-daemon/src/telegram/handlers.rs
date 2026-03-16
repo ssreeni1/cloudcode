@@ -51,19 +51,31 @@ async fn handle_command(
             bot.send_message(msg.chat.id, help_text)
                 .parse_mode(ParseMode::MarkdownV2)
                 .await?;
+
+            // Auto-list existing sessions on /start
+            if let Ok(sessions) = state.session_mgr.list().await {
+                if !sessions.is_empty() {
+                    let default = state.default_session.lock().await;
+                    let mut session_list = String::from("📋 Existing sessions:\n");
+                    for s in &sessions {
+                        let marker = if default.as_deref() == Some(&s.name) { " ← default" } else { "" };
+                        session_list.push_str(&format!("• {}{}\n", s.name, marker));
+                    }
+                    session_list.push_str("\nUse /use <name> to set a default session.");
+                    bot.send_message(msg.chat.id, session_list).await?;
+                }
+            }
         }
         "/spawn" => {
             let name = if args.is_empty() { None } else { Some(args.to_string()) };
             match state.session_mgr.spawn(name).await {
                 Ok(session) => {
-                    // Auto-set as default if no default exists
+                    // Always set newly spawned session as default
                     let mut default = state.default_session.lock().await;
-                    if default.is_none() {
-                        *default = Some(session.name.clone());
-                    }
+                    *default = Some(session.name.clone());
                     bot.send_message(
                         msg.chat.id,
-                        format!("✅ Session '{}' created.", session.name),
+                        format!("✅ Session '{}' created and set as default. Send any message to start chatting.", session.name),
                     )
                     .await?;
                 }
@@ -164,31 +176,90 @@ async fn handle_free_text(
     state: &Arc<BotState>,
     text: &str,
 ) -> ResponseResult<()> {
-    let default = state.default_session.lock().await;
-    let session_name = match default.as_deref() {
-        Some(name) => name.to_string(),
+    let session_name = {
+        let default = state.default_session.lock().await;
+        default.clone()
+    };
+    let session_name = match session_name {
+        Some(name) => name,
         None => {
-            bot.send_message(
-                msg.chat.id,
-                "No default session set. Use /spawn to create one or /use <name> to set one.",
-            )
-            .await?;
-            return Ok(());
+            // No default set — try to auto-resolve
+            match state.session_mgr.list().await {
+                Ok(sessions) if sessions.len() == 1 => {
+                    // Exactly one session: auto-set it as default and proceed
+                    let name = sessions[0].name.clone();
+                    let mut default = state.default_session.lock().await;
+                    *default = Some(name.clone());
+                    drop(default);
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("📌 Auto-selected session '{}'.", name),
+                    )
+                    .await?;
+                    name
+                }
+                Ok(sessions) if sessions.is_empty() => {
+                    bot.send_message(
+                        msg.chat.id,
+                        "No sessions available. Use /spawn to create one.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Ok(sessions) => {
+                    // Multiple sessions — list them for the user
+                    let mut list = String::from("No default session set. Available sessions:\n");
+                    for s in &sessions {
+                        list.push_str(&format!("• {}\n", s.name));
+                    }
+                    list.push_str("\nUse /use <name> to pick one.");
+                    bot.send_message(msg.chat.id, list).await?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
+                    return Ok(());
+                }
+            }
         }
     };
-    drop(default); // Release the lock before the potentially long send operation
 
     // Send typing indicator
     bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
         .await?;
 
     match state.session_mgr.send(&session_name, text).await {
-        Ok(output) => {
-            // Chunk and send the output
-            let chunks = formatter::chunk_message(&output, 4096);
-            for chunk in chunks {
-                if !chunk.trim().is_empty() {
-                    bot.send_message(msg.chat.id, chunk).await?;
+        Ok(result) => {
+            // Send text response
+            if !result.text.is_empty() {
+                let chunks = formatter::chunk_message(&result.text, 4096);
+                for chunk in chunks {
+                    if !chunk.trim().is_empty() {
+                        bot.send_message(msg.chat.id, chunk).await?;
+                    }
+                }
+            }
+
+            // Send any files that were created
+            for file_path in &result.files {
+                let path = std::path::Path::new(file_path);
+                if !path.exists() {
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+
+                let file = teloxide::types::InputFile::file(path);
+                if matches!(ext.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+                    // Send images as photos
+                    bot.send_photo(msg.chat.id, file)
+                        .caption(filename)
+                        .await?;
+                } else {
+                    // Send everything else as documents
+                    bot.send_document(msg.chat.id, file)
+                        .caption(filename)
+                        .await?;
                 }
             }
         }

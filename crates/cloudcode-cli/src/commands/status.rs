@@ -30,7 +30,7 @@ pub async fn run() -> Result<()> {
     let vps_config = config.vps.as_ref();
     let server_type = vps_config
         .and_then(|v| v.server_type.as_deref())
-        .unwrap_or("cx22");
+        .unwrap_or("cx23");
     let location = vps_config
         .and_then(|v| v.location.as_deref())
         .unwrap_or("nbg1");

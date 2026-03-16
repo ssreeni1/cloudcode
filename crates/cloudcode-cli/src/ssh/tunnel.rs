@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::state::VpsState;
-use super::{ssh_base_args, daemon_socket_path};
+use super::daemon_socket_path;
 
 pub struct DaemonClient {
     tunnel: Option<Child>,
@@ -25,14 +25,21 @@ impl DaemonClient {
         // Clean up stale socket
         let _ = std::fs::remove_file(&socket_path);
 
-        // Build SSH args
-        let mut args = ssh_base_args(ip)?;
-        args.extend([
+        // Build SSH args — deliberately bypass ControlMaster so the -L
+        // forwarding runs on a dedicated connection.
+        let key_path = crate::config::Config::ssh_key_path()?;
+        let args = vec![
+            "-i".to_string(), key_path.to_string_lossy().to_string(),
+            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
+            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
+            "-o".to_string(), "LogLevel=ERROR".to_string(),
+            "-o".to_string(), "ConnectTimeout=10".to_string(),
+            "-o".to_string(), "ControlMaster=no".to_string(),
             "-N".to_string(), // no remote command
             "-o".to_string(), "ExitOnForwardFailure=yes".to_string(),
             "-L".to_string(), format!("{}:127.0.0.1:7700", socket_path.display()),
             format!("claude@{}", ip),
-        ]);
+        ];
 
         let tunnel = Command::new("ssh")
             .args(&args)
@@ -298,10 +305,14 @@ mod tests {
 
     #[test]
     fn response_deserializes_from_json_line_send_result() {
+        // files field is optional (serde default) so old JSON without it still works
         let json_line = r#"{"type":"send_result","output":"done"}"#;
         let resp: DaemonResponse = serde_json::from_str(json_line).unwrap();
         match resp {
-            DaemonResponse::SendResult { output } => assert_eq!(output, "done"),
+            DaemonResponse::SendResult { output, files } => {
+                assert_eq!(output, "done");
+                assert!(files.is_empty());
+            }
             other => panic!("Expected SendResult, got {:?}", other),
         }
     }

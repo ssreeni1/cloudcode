@@ -77,6 +77,17 @@ struct GetServerResponse {
 
 pub fn estimate_monthly_cost(server_type: &str) -> Option<f64> {
     match server_type {
+        // Current gen (CX Gen3)
+        "cx23" => Some(3.99),
+        "cx33" => Some(6.49),
+        "cx43" => Some(14.99),
+        "cx53" => Some(29.99),
+        // ARM (CAX)
+        "cax11" => Some(3.49),
+        "cax21" => Some(5.49),
+        "cax31" => Some(9.49),
+        "cax41" => Some(16.49),
+        // Deprecated (kept for status display of existing servers)
         "cx22" => Some(3.99),
         "cx32" => Some(6.49),
         "cx42" => Some(14.99),
@@ -142,6 +153,11 @@ impl HetznerClient {
             .await
             .context("Failed to create SSH key")?;
 
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            // Key already exists — find it by name and reuse
+            return self.find_ssh_key_by_name(name).await;
+        }
+
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -150,6 +166,35 @@ impl HetznerClient {
 
         let data: CreateSshKeyResponse = resp.json().await.context("Failed to parse SSH key response")?;
         Ok(data.ssh_key.id)
+    }
+
+    async fn find_ssh_key_by_name(&self, name: &str) -> Result<u64> {
+        let resp = self
+            .client
+            .get(format!("{}/ssh_keys?name={}", self.base_url, name))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("Failed to list SSH keys")?;
+
+        if !resp.status().is_success() {
+            bail!("Failed to list SSH keys (HTTP {})", resp.status());
+        }
+
+        let data: serde_json::Value = resp.json().await.context("Failed to parse SSH keys response")?;
+        let keys = data["ssh_keys"]
+            .as_array()
+            .context("Unexpected SSH keys response format")?;
+
+        for key in keys {
+            if key["name"].as_str() == Some(name) {
+                return key["id"]
+                    .as_u64()
+                    .context("SSH key missing id field");
+            }
+        }
+
+        bail!("SSH key '{}' exists but could not be found by name", name)
     }
 
     pub async fn delete_ssh_key(&self, id: u64) -> Result<()> {

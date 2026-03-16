@@ -35,7 +35,10 @@ pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonRespo
             },
         },
         DaemonRequest::Send { session, message } => match mgr.send(&session, &message).await {
-            Ok(output) => DaemonResponse::SendResult { output },
+            Ok(result) => DaemonResponse::SendResult {
+                output: result.text,
+                files: result.files.iter().map(|f| f.to_string_lossy().to_string()).collect(),
+            },
             Err(e) => DaemonResponse::Error {
                 message: e.to_string(),
             },

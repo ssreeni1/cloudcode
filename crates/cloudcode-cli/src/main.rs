@@ -19,9 +19,11 @@ async fn main() -> anyhow::Result<()> {
         Command::Status => commands::status::run().await,
         Command::Spawn { name } => commands::spawn::run(name).await,
         Command::List => commands::list::run().await,
-        Command::Attach { session } => commands::attach::run(session).await,
+        Command::Open { session } => commands::attach::run(session).await,
         Command::Send { session, message } => commands::send::run(session, message).await,
         Command::Kill { session } => commands::kill::run(session).await,
+        Command::Restart => commands::restart::run().await,
+        Command::Logs { target } => commands::logs::run(target).await,
         Command::Ssh { command } => commands::ssh_cmd::run(command).await,
     }
 }

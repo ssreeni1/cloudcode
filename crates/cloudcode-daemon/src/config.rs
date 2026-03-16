@@ -31,7 +31,26 @@ impl DaemonConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read daemon config from {}", path.display()))?;
-        toml::from_str(&content).context("Failed to parse daemon config")
+        let mut config: Self = toml::from_str(&content).context("Failed to parse daemon config")?;
+        config.validate();
+        Ok(config)
+    }
+
+    /// Validate config and fix insecure values.
+    /// If listen_addr is not a loopback address, log a warning and override to 127.0.0.1.
+    fn validate(&mut self) {
+        if !Self::is_loopback(&self.listen_addr) {
+            eprintln!(
+                "WARNING: listen_addr '{}' is not a loopback address. Overriding to 127.0.0.1 for security.",
+                self.listen_addr
+            );
+            self.listen_addr = "127.0.0.1".to_string();
+        }
+    }
+
+    fn is_loopback(addr: &str) -> bool {
+        // Accept 127.0.0.1 and ::1 as loopback addresses
+        addr == "127.0.0.1" || addr == "::1"
     }
 }
 
@@ -280,5 +299,74 @@ mod tests {
         "#;
         let config: DaemonConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.listen_addr, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Listen address validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_loopback_127_is_accepted() {
+        let mut config = DaemonConfig {
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: 7700,
+            telegram: None,
+        };
+        config.validate();
+        assert_eq!(config.listen_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn validate_loopback_ipv6_is_accepted() {
+        let mut config = DaemonConfig {
+            listen_addr: "::1".to_string(),
+            listen_port: 7700,
+            telegram: None,
+        };
+        config.validate();
+        assert_eq!(config.listen_addr, "::1");
+    }
+
+    #[test]
+    fn validate_non_loopback_is_overridden() {
+        let mut config = DaemonConfig {
+            listen_addr: "0.0.0.0".to_string(),
+            listen_port: 7700,
+            telegram: None,
+        };
+        config.validate();
+        assert_eq!(config.listen_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn validate_public_ip_is_overridden() {
+        let mut config = DaemonConfig {
+            listen_addr: "10.0.0.1".to_string(),
+            listen_port: 8080,
+            telegram: None,
+        };
+        config.validate();
+        assert_eq!(config.listen_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn validate_empty_addr_is_overridden() {
+        let mut config = DaemonConfig {
+            listen_addr: "".to_string(),
+            listen_port: 7700,
+            telegram: None,
+        };
+        config.validate();
+        assert_eq!(config.listen_addr, "127.0.0.1");
+    }
+
+    #[test]
+    fn is_loopback_correctness() {
+        assert!(DaemonConfig::is_loopback("127.0.0.1"));
+        assert!(DaemonConfig::is_loopback("::1"));
+        assert!(!DaemonConfig::is_loopback("0.0.0.0"));
+        assert!(!DaemonConfig::is_loopback("192.168.1.1"));
+        assert!(!DaemonConfig::is_loopback(""));
+        assert!(!DaemonConfig::is_loopback("localhost"));
     }
 }
