@@ -254,11 +254,7 @@ pub async fn run(no_wait: bool, server_type_override: Option<String>) -> Result<
     }
 
     // Step 5: Wait for cloud-init completion
-    let pb = step_bar(
-        5,
-        TOTAL_STEPS,
-        "Waiting for cloud-init to complete...",
-    );
+    let pb = step_bar(5, TOTAL_STEPS, "Waiting for cloud-init to complete...");
     match health::wait_for_cloud_init(&state, Duration::from_secs(600)).await? {
         CloudInitStatus::Ready => {
             finish_step(&pb, 5, TOTAL_STEPS, "Cloud-init completed successfully");
@@ -311,19 +307,10 @@ pub async fn run(no_wait: bool, server_type_override: Option<String>) -> Result<
 
     // Step 7: Prepare daemon binary (embedded or cross-compile fallback)
     let target = crate::deploy::target_triple_for_server_type(server_type);
-    let pb = step_bar(
-        7,
-        TOTAL_STEPS,
-        &format!("Preparing daemon for {target}..."),
-    );
+    let pb = step_bar(7, TOTAL_STEPS, &format!("Preparing daemon for {target}..."));
     let binary_path = match crate::deploy::get_daemon_binary(target) {
         Ok(path) => {
-            finish_step(
-                &pb,
-                7,
-                TOTAL_STEPS,
-                &format!("Daemon ready for {target}"),
-            );
+            finish_step(&pb, 7, TOTAL_STEPS, &format!("Daemon ready for {target}"));
             path
         }
         Err(e) => {

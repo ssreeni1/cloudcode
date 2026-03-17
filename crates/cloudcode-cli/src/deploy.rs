@@ -1,12 +1,28 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ssh::{shell_command, ssh_base_args};
+use crate::ssh::ssh_base_args;
 use crate::state::VpsState;
 
 // Embedded daemon binaries (populated by build.rs when pre-built binaries are available)
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/embedded_daemons.rs"));
+}
+
+fn cloudcode_cache_dir() -> Result<PathBuf> {
+    let dir = dirs::home_dir()
+        .context("Could not determine home directory")?
+        .join(".cloudcode")
+        .join("cache")
+        .join("embedded-daemons");
+    std::fs::create_dir_all(&dir).context("Failed to create embedded daemon cache")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
 }
 
 fn ssh_command_args(ip: &str, command: &str) -> Result<Vec<String>> {
@@ -37,18 +53,35 @@ pub fn get_daemon_binary(target: &str) -> Result<PathBuf> {
 
 /// Extract an embedded daemon binary to a temp file, if one was baked in at compile time.
 fn extract_embedded_daemon(target: &str) -> Result<Option<PathBuf>> {
-    let bytes = match target {
-        "x86_64-unknown-linux-gnu" => embedded::DAEMON_X86_64,
-        "aarch64-unknown-linux-gnu" => embedded::DAEMON_AARCH64,
-        _ => None,
+    let (bytes, checksum) = match target {
+        "x86_64-unknown-linux-gnu" => (embedded::DAEMON_X86_64, embedded::DAEMON_X86_64_SHA256),
+        "aarch64-unknown-linux-gnu" => (embedded::DAEMON_AARCH64, embedded::DAEMON_AARCH64_SHA256),
+        _ => (None, None),
     };
 
-    let bytes = match bytes {
-        Some(b) => b,
-        None => return Ok(None),
+    let (bytes, checksum) = match (bytes, checksum) {
+        (Some(bytes), Some(checksum)) => (bytes, checksum),
+        (None, None) => return Ok(None),
+        _ => anyhow::bail!("Embedded daemon metadata is incomplete for {target}"),
     };
 
-    let tmp_path = std::env::temp_dir().join(format!("cloudcode-daemon-{}", target));
+    let cache_dir = cloudcode_cache_dir()?;
+    let final_path = cache_dir.join(format!("cloudcode-daemon-{target}-{checksum}"));
+    if final_path.exists() {
+        return Ok(Some(final_path));
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = cache_dir.join(format!("cloudcode-daemon-{target}-{checksum}.{nonce}.tmp"));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .context("Failed to create embedded daemon temp file")?;
+    drop(file);
     std::fs::write(&tmp_path, bytes).context("Failed to write embedded daemon binary")?;
 
     #[cfg(unix)]
@@ -57,7 +90,18 @@ fn extract_embedded_daemon(target: &str) -> Result<Option<PathBuf>> {
         std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    Ok(Some(tmp_path))
+    std::fs::rename(&tmp_path, &final_path)
+        .or_else(|err| {
+            if final_path.exists() {
+                let _ = std::fs::remove_file(&tmp_path);
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })
+        .context("Failed to finalize embedded daemon binary")?;
+
+    Ok(Some(final_path))
 }
 
 /// Cross-compile the daemon binary locally using cargo-zigbuild.
@@ -117,22 +161,15 @@ pub fn cross_compile_daemon(target: &str) -> Result<PathBuf> {
 /// Upload the pre-compiled daemon binary to the VPS via scp.
 pub fn upload_binary(state: &VpsState, local_binary: &Path) -> Result<()> {
     let ip = state.server_ip.as_ref().context("No server IP")?;
-    let ssh_opts = shell_command(&ssh_base_args(ip)?);
+    let mut scp_args = ssh_base_args(ip)?;
 
     // scp binary to /tmp on the VPS
+    scp_args.extend([
+        local_binary.to_string_lossy().to_string(),
+        format!("claude@{}:/tmp/cloudcode-daemon", ip),
+    ]);
     let status = std::process::Command::new("scp")
-        .args([
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-e",
-            &ssh_opts,
-            &local_binary.to_string_lossy(),
-            &format!("claude@{}:/tmp/cloudcode-daemon", ip),
-        ])
+        .args(&scp_args)
         .status()
         .context("Failed to scp binary")?;
 

@@ -75,30 +75,6 @@ fn ensure_known_hosts_file(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Quote a shell argument for use in `rsync -e`.
-pub fn shell_quote(arg: &str) -> String {
-    if arg.is_empty() {
-        return "''".to_string();
-    }
-
-    if arg.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '_' | '-' | '.' | '/' | ':' | '%' | '=' | ',' | '@')
-    }) {
-        return arg.to_string();
-    }
-
-    format!("'{}'", arg.replace('\'', r#"'"'"'"#))
-}
-
-/// Render a command line suitable for passing to a shell, such as rsync's `-e`.
-pub fn shell_command(args: &[String]) -> String {
-    args.iter()
-        .map(|arg| shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Path to the daemon forwarding socket for a given server
 pub fn daemon_socket_path(server_id: u64) -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
@@ -116,31 +92,5 @@ mod tests {
         let path = known_hosts_path().unwrap();
         assert!(path.ends_with("known_hosts"));
         assert!(path.to_string_lossy().contains(".cloudcode"));
-    }
-
-    #[test]
-    fn shell_quote_leaves_simple_args_unquoted() {
-        assert_eq!(shell_quote("ssh"), "ssh");
-        assert_eq!(shell_quote("ControlPersist=300"), "ControlPersist=300");
-    }
-
-    #[test]
-    fn shell_quote_handles_spaces_and_quotes() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-        assert_eq!(shell_quote("it's fine"), "'it'\"'\"'s fine'");
-    }
-
-    #[test]
-    fn shell_command_quotes_each_argument() {
-        let rendered = shell_command(&vec![
-            "ssh".to_string(),
-            "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
-            "hello world".to_string(),
-        ]);
-        assert_eq!(
-            rendered,
-            "ssh -o StrictHostKeyChecking=accept-new 'hello world'"
-        );
     }
 }
