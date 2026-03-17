@@ -59,6 +59,11 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let dir = Self::dir()?;
         fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
         let path = Self::path()?;
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
         fs::write(&path, &content)?;

@@ -16,15 +16,28 @@ pub enum DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonResponse {
-    Spawned { session: SessionInfo },
-    Sessions { sessions: Vec<SessionInfo> },
-    Killed { session: String },
+    Spawned {
+        session: SessionInfo,
+    },
+    Sessions {
+        sessions: Vec<SessionInfo>,
+    },
+    Killed {
+        session: String,
+    },
     SendResult {
         output: String,
         #[serde(default)]
         files: Vec<String>,
     },
-    Status { uptime_secs: u64, sessions: Vec<SessionInfo> },
-    CleanedUp { sessions: Vec<String> },
-    Error { message: String },
+    Status {
+        uptime_secs: u64,
+        sessions: Vec<SessionInfo>,
+    },
+    CleanedUp {
+        sessions: Vec<String>,
+    },
+    Error {
+        message: String,
+    },
 }

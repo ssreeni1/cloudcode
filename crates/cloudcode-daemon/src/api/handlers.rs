@@ -1,6 +1,6 @@
-use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use crate::session::manager::SessionManager;
 use crate::session::monitor::SessionMonitor;
+use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -37,7 +37,11 @@ pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonRespo
         DaemonRequest::Send { session, message } => match mgr.send(&session, &message).await {
             Ok(result) => DaemonResponse::SendResult {
                 output: result.text,
-                files: result.files.iter().map(|f| f.to_string_lossy().to_string()).collect(),
+                files: result
+                    .files
+                    .iter()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .collect(),
             },
             Err(e) => DaemonResponse::Error {
                 message: e.to_string(),

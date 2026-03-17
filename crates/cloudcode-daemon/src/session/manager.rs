@@ -1,9 +1,7 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use cloudcode_common::session::{SessionInfo, SessionState};
-use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
@@ -36,9 +34,19 @@ fn is_sendable_file(path: &PathBuf) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext.to_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg"
-            | "pdf" | "md" | "txt" | "json" | "csv"
-            | "html" | "log"
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "pdf"
+            | "md"
+            | "txt"
+            | "json"
+            | "csv"
+            | "html"
+            | "log"
     )
 }
 
@@ -67,198 +75,92 @@ fn validate_session_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn daemon_home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/home/claude"))
+}
+
+fn session_workspace_dir_from_home(home: &Path, session: &str) -> PathBuf {
+    home.join(".cloudcode")
+        .join("sessions")
+        .join(session)
+        .join("workspace")
+}
+
+fn session_workspace_dir(session: &str) -> Result<PathBuf> {
+    validate_session_name(session)?;
+    let dir = session_workspace_dir_from_home(&daemon_home_dir(), session);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create workspace dir {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = dir.parent() {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("Failed to secure {}", parent.display()))?;
+        }
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to secure {}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
+async fn session_runtime_workdir(session: &str) -> Result<PathBuf> {
+    let workspace = session_workspace_dir_from_home(&daemon_home_dir(), session);
+    if workspace.exists() {
+        return Ok(workspace);
+    }
+
+    let output = Command::new("tmux")
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{pane_current_path}",
+        ])
+        .output()
+        .await
+        .context("Failed to query tmux pane current path")?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    std::fs::create_dir_all(&workspace)
+        .with_context(|| format!("Failed to create workspace dir {}", workspace.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = workspace.parent() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+        let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(workspace)
+}
+
+fn session_snapshot_dirs_from_workdir(workdir: &Path) -> Vec<PathBuf> {
+    vec![
+        workdir.to_path_buf(),
+        workdir.join("screenshots"),
+        workdir.join("output"),
+        PathBuf::from("/tmp"),
+    ]
+}
+
 pub struct SessionManager {
-    output_counter: AtomicU64,
     send_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    output_dir: PathBuf,
-}
-
-fn strip_ansi(input: &str) -> String {
-    // Match all common terminal escape sequences:
-    // - CSI sequences: \x1b[ ... (letter)  — including \x1b[?... variants
-    // - OSC sequences: \x1b] ... \x07
-    // - Character set: \x1b(B
-    // - SGR (color): \x1b[ ... m
-    let re = Regex::new(
-        r"(?x)
-        \x1b \[ [?]? [0-9;]* [a-zA-Z]  |  # CSI sequences (including ?2026h etc)
-        \x1b \] .*? \x07                |  # OSC sequences
-        \x1b \( B                        |  # Character set selection
-        \x1b \[ [0-9;]* m               |  # SGR (color/style)
-        \x1b [78]                        |  # Save/restore cursor
-        \x1b =                           |  # Set keypad mode
-        \r                                  # Carriage returns
-        "
-    ).unwrap();
-    let stripped = re.replace_all(input, "").to_string();
-
-    // Filter out lines that are purely decorative (spinners, box drawing, progress)
-    stripped
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            // Skip empty lines only if they'd create excessive gaps
-            if trimmed.is_empty() {
-                return true;
-            }
-            // Skip lines that are only box-drawing chars, spinners, or decorative
-            let decorative_only = trimmed.chars().all(|c| {
-                matches!(c,
-                    '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' |
-                    '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '┣' | '┫' | '┳' | '┻' | '╋' |
-                    '═' | '║' | '╔' | '╗' | '╚' | '╝' | '╠' | '╣' | '╦' | '╩' | '╬' |
-                    '◐' | '◑' | '◒' | '◓' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏' |
-                    '✶' | '✻' | '✽' | '✢' | '●' | '·' | '…' |
-                    ' '
-                )
-            });
-            !decorative_only
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Check if a line looks like Claude Code's input prompt.
-/// Claude Code shows various prompt indicators - we look for common patterns
-/// at the end of visible output that indicate it's waiting for input.
-fn is_prompt_line(line: &str) -> bool {
-    let stripped = strip_ansi(line);
-    let trimmed = stripped.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Claude Code prompt patterns:
-    // - Ends with ">" or "❯" (common prompt chars)
-    // - Ends with "$" (shell prompt if claude exited)
-    // - Contains "(/help" which appears in Claude's prompt hint
-    trimmed.ends_with('>')
-        || trimmed.ends_with('❯')
-        || trimmed.ends_with('$')
-        || trimmed.contains("/help")
-}
-
-/// Check if a line is Claude Code TUI chrome (not actual response content)
-fn is_ui_noise(line: &str) -> bool {
-    let t = line.trim();
-    if t.is_empty() {
-        return false; // Keep empty lines (collapsed later)
-    }
-    // Box drawing borders
-    if t.chars().all(|c| matches!(c, '╭' | '╮' | '╰' | '╯' | '│' | '─' | '┌' | '┐' | '└' | '┘' | '├' | '┤'
-        | '┬' | '┴' | '┼' | '━' | '┃' | '┏' | '┓' | '┗' | '┛' | '═' | '║' | '╔' | '╗' | '╚' | '╝'
-        | '╠' | '╣' | '╦' | '╩' | '╬' | '◐' | '◑' | '◒' | '◓' | '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴'
-        | '⠦' | '⠧' | '⠇' | '⠏' | '✶' | '✻' | '✽' | '✢' | '●' | '·' | '…' | ' ' | '▐' | '▛' | '▜'
-        | '▌' | '▝' | '▘' | '█')) {
-        return true;
-    }
-    // Claude Code welcome/chrome patterns
-    t.starts_with("╭") || t.starts_with("╰") || t.starts_with("│")
-        || t.contains("Claude Code v")
-        || t.contains("Welcome back")
-        || t.contains("Tips for getting started")
-        || t.contains("/init to create")
-        || t.contains("CLAUDE.md")
-        || t.contains("launched claude in your home")
-        || t.contains("project directory instead")
-        || t.contains("Recent activity")
-        || t.contains("No recent activity")
-        || t.contains("Opus 4.6")
-        || t.contains("Claude Max")
-        || t.contains("Organization")
-        || t.contains("1M context")
-        || t.contains("more room, same pricing")
-        || t.contains("bypass permissions")
-        || t.contains("shift+tab to cycle")
-        || t.contains("esc to")
-        || t.contains("to interrupt")
-        || t.contains("/effort")
-        || t.contains("for shortcuts")
-        || t.contains("? for shortcuts")
-        || t.contains("Enter to confirm")
-        || t.contains("Esc to cancel")
-        || t.contains("Security guide")
-        || t.contains("trust this folder")
-        || t.contains("[>0q")
-        || (t.starts_with("↑") && t.len() < 5)
-        || t == "❯"
-        || t == ">"
-}
-
-fn extract_response(output: &str, sent_message: &str) -> String {
-    let lines: Vec<&str> = output.lines().collect();
-
-    // Find where the echoed input ends and response begins
-    let mut start_idx = 0;
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(sent_message) || line.trim() == sent_message.trim() {
-            start_idx = i + 1;
-            break;
-        }
-    }
-
-    // Find where the response ends (last prompt line)
-    let mut end_idx = lines.len();
-    for i in (start_idx..lines.len()).rev() {
-        let trimmed = lines[i].trim();
-        if !trimmed.is_empty() {
-            if is_prompt_line(lines[i]) {
-                end_idx = i;
-            }
-            break;
-        }
-    }
-
-    // Filter out all UI noise
-    let content_lines: Vec<&str> = lines[start_idx..end_idx]
-        .iter()
-        .filter(|line| !is_ui_noise(line))
-        .copied()
-        .collect();
-
-    // Collapse multiple blank lines into one
-    let mut result = String::new();
-    let mut prev_blank = false;
-    for line in &content_lines {
-        if line.trim().is_empty() {
-            if !prev_blank {
-                result.push('\n');
-            }
-            prev_blank = true;
-        } else {
-            if prev_blank && !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(line);
-            result.push('\n');
-            prev_blank = false;
-        }
-    }
-
-    result.trim().to_string()
 }
 
 impl SessionManager {
     pub fn new() -> Self {
-        let output_dir = PathBuf::from("/home/claude/.cloudcode/output");
-
-        // Create output directory with mode 0700
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            let _ = std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&output_dir);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = std::fs::create_dir_all(&output_dir);
-        }
-
         Self {
-            output_counter: AtomicU64::new(0),
             send_locks: std::sync::Mutex::new(HashMap::new()),
-            output_dir,
         }
     }
 
@@ -289,6 +191,8 @@ impl SessionManager {
         });
 
         validate_session_name(&name)?;
+        let workspace = session_workspace_dir(&name)?;
+        let workspace_arg = workspace.to_string_lossy().to_string();
 
         // Check if session already exists
         if self.session_exists(&name).await {
@@ -302,7 +206,7 @@ impl SessionManager {
         let claude_bin = format!("{}/.local/bin/claude", home);
         let home_env = format!("HOME={}", home);
         let shell_cmd = format!(
-            "{} --dangerously-skip-permissions --permission-mode bypassPermissions",
+            "exec {} --dangerously-skip-permissions --permission-mode bypassPermissions",
             claude_bin
         );
         let status = Command::new("tmux")
@@ -315,8 +219,12 @@ impl SessionManager {
                 "200",
                 "-y",
                 "50",
+                "-c",
+                &workspace_arg,
                 "-e",
                 &home_env,
+                "sh",
+                "-lc",
                 &shell_cmd,
             ])
             .status()
@@ -326,17 +234,6 @@ impl SessionManager {
         if !status.success() {
             bail!("tmux new-session failed with status {}", status);
         }
-
-        // Auto-accept the workspace trust prompt by sending Enter after a short delay
-        let accept_name = name.clone();
-        tokio::spawn(async move {
-            // Wait for Claude Code to show the trust prompt
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            let _ = Command::new("tmux")
-                .args(["send-keys", "-t", &accept_name, "Enter"])
-                .status()
-                .await;
-        });
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -370,10 +267,8 @@ impl SessionManager {
                     .map(|line| {
                         let parts: Vec<&str> = line.splitn(3, ':').collect();
                         let name = parts.first().unwrap_or(&"unknown").to_string();
-                        let created_at =
-                            parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                        let last_activity =
-                            parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let created_at = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let last_activity = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                         SessionInfo {
                             name,
                             state: SessionState::Running,
@@ -428,16 +323,12 @@ impl SessionManager {
         };
         let _guard = lock.lock().await;
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/claude".to_string());
+        let home = daemon_home_dir().to_string_lossy().to_string();
         let claude_bin = format!("{}/.local/bin/claude", home);
+        let workdir = session_runtime_workdir(session).await?;
 
         // Snapshot existing files before running claude
-        let watch_dirs = vec![
-            PathBuf::from(&home),
-            PathBuf::from(format!("{}/screenshots", home)),
-            PathBuf::from(format!("{}/output", home)),
-            PathBuf::from("/tmp"),
-        ];
+        let watch_dirs = session_snapshot_dirs_from_workdir(&workdir);
         let files_before = snapshot_files(&watch_dirs);
 
         // Use claude -p (print mode) for clean text output.
@@ -448,6 +339,7 @@ impl SessionManager {
                 "--continue",
                 message,
             ])
+            .current_dir(&workdir)
             .output()
             .await
             .context("Failed to run claude in print mode")?;
@@ -471,156 +363,6 @@ impl SessionManager {
             text: response,
             files: new_files,
         })
-    }
-
-    /// Capture current pane content
-    pub async fn capture(&self, session: &str) -> Result<String> {
-        let output = Command::new("tmux")
-            .args(["capture-pane", "-t", session, "-p", "-J", "-S", "-100"])
-            .output()
-            .await
-            .context("Failed to capture pane")?;
-
-        if !output.status.success() {
-            bail!("tmux capture-pane failed");
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    async fn start_output_capture(&self, session: &str) -> Result<PathBuf> {
-        let id = self.output_counter.fetch_add(1, Ordering::Relaxed);
-        let path = self.output_dir.join(format!("{}-{}.log", session, id));
-
-        // Pre-create output file with mode 0600
-        let _ = tokio::fs::remove_file(&path).await;
-        {
-            #[cfg(unix)]
-            {
-                use std::fs::OpenOptions;
-                use std::os::unix::fs::OpenOptionsExt;
-                OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&path)
-                    .context("Failed to create output capture file")?;
-            }
-            #[cfg(not(unix))]
-            {
-                tokio::fs::write(&path, b"").await?;
-            }
-        }
-
-        // Start piping pane output to file
-        let status = Command::new("tmux")
-            .args([
-                "pipe-pane",
-                "-o",
-                "-t",
-                session,
-                &format!("cat >> {}", path.display()),
-            ])
-            .status()
-            .await
-            .context("Failed to start pipe-pane")?;
-
-        if !status.success() {
-            bail!("tmux pipe-pane failed");
-        }
-        Ok(path)
-    }
-
-    async fn stop_output_capture(&self, session: &str) -> Result<()> {
-        let _ = Command::new("tmux")
-            .args(["pipe-pane", "-t", session])
-            .status()
-            .await;
-        Ok(())
-    }
-
-    async fn capture_last_lines(&self, session: &str, n: u32) -> Result<String> {
-        let output = Command::new("tmux")
-            .args([
-                "capture-pane",
-                "-p",
-                "-J",
-                "-t",
-                session,
-                "-S",
-                &format!("-{}", n),
-            ])
-            .output()
-            .await
-            .context("Failed to capture pane")?;
-
-        if !output.status.success() {
-            bail!("tmux capture-pane failed");
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    /// Wait for output to stabilize (Claude finished responding)
-    async fn wait_for_output(&self, session: &str) -> Result<()> {
-        let mut last_capture = String::new();
-        let mut stable_count = 0u32;
-        let start = std::time::Instant::now();
-        let max_duration = std::time::Duration::from_secs(170); // under client's 180s timeout
-
-        // Initial delay to let Claude start processing
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed > max_duration {
-                break; // Timeout - return whatever we have
-            }
-
-            // Adaptive poll interval
-            let interval = if elapsed.as_secs() < 2 {
-                100 // 100ms for first 2 seconds (fast responses)
-            } else if elapsed.as_secs() < 10 {
-                250 // 250ms for 2-10 seconds
-            } else {
-                500 // 500ms after 10 seconds
-            };
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
-
-            let capture = self.capture_last_lines(session, 5).await?;
-            let clean = strip_ansi(&capture);
-
-            // Check for prompt in last non-empty line
-            if let Some(last_line) = clean.lines().rev().find(|l| !l.trim().is_empty()) {
-                if is_prompt_line(last_line) {
-                    // Confirm stability - wait one more interval
-                    tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
-                    let confirm = self.capture_last_lines(session, 5).await?;
-                    let confirm_clean = strip_ansi(&confirm);
-                    if let Some(confirm_line) =
-                        confirm_clean.lines().rev().find(|l| !l.trim().is_empty())
-                    {
-                        if is_prompt_line(confirm_line) {
-                            break; // Prompt confirmed stable
-                        }
-                    }
-                }
-            }
-
-            // Fallback: stabilization check (output unchanged)
-            if clean == last_capture {
-                stable_count += 1;
-                let threshold = if elapsed.as_secs() < 5 { 8 } else { 5 };
-                if stable_count >= threshold {
-                    break;
-                }
-            } else {
-                stable_count = 0;
-                last_capture = clean;
-            }
-        }
-
-        Ok(())
     }
 
     async fn session_exists(&self, name: &str) -> bool {
@@ -676,73 +418,90 @@ mod tests {
         assert!(validate_session_name("name.with.dots").is_err());
     }
 
+    // -----------------------------------------------------------------------
+    // SessionManager struct tests (dead code removed)
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_strip_ansi_removes_color_codes() {
-        assert_eq!(strip_ansi("\x1b[32mhello\x1b[0m"), "hello");
-        assert_eq!(strip_ansi("\x1b[1;31mred\x1b[0m"), "red");
-        assert_eq!(strip_ansi("no codes here"), "no codes here");
-        assert_eq!(strip_ansi(""), "");
+    fn session_manager_new_has_no_extra_fields() {
+        // SessionManager should only have send_locks now
+        // (output_counter and output_dir were removed)
+        let mgr = SessionManager::new();
+        // Verify send_locks is accessible and empty
+        let locks = mgr.send_locks.lock().unwrap();
+        assert!(locks.is_empty());
     }
 
     #[test]
-    fn test_strip_ansi_removes_cursor_codes() {
-        assert_eq!(strip_ansi("\x1b[2Jhello"), "hello");
-        assert_eq!(strip_ansi("\x1b[Hhello"), "hello");
-    }
-
-    #[test]
-    fn test_is_prompt_line_detects_prompts() {
-        assert!(is_prompt_line(">"));
-        assert!(is_prompt_line("❯"));
-        assert!(is_prompt_line("$ "));
-        assert!(is_prompt_line("Type /help for help"));
-        assert!(is_prompt_line("\x1b[32m>\x1b[0m")); // colored prompt
-    }
-
-    #[test]
-    fn test_is_prompt_line_rejects_non_prompts() {
-        assert!(!is_prompt_line(""));
-        assert!(!is_prompt_line("   "));
-        assert!(!is_prompt_line("Hello, how can I help?"));
-        assert!(!is_prompt_line("The answer is 42"));
-    }
-
-    #[test]
-    fn test_extract_response_basic() {
-        let output = "hello\nThe answer is 42.\n>";
-        let result = extract_response(output, "hello");
-        assert_eq!(result, "The answer is 42.");
-    }
-
-    #[test]
-    fn test_extract_response_multiline() {
-        let output =
-            "what is rust\nRust is a systems programming language.\nIt focuses on safety and performance.\n>";
-        let result = extract_response(output, "what is rust");
+    fn session_workspace_dir_is_namespaced_by_session() {
+        let home = PathBuf::from("/home/claude");
+        let dir = session_workspace_dir_from_home(&home, "alpha");
         assert_eq!(
-            result,
-            "Rust is a systems programming language.\nIt focuses on safety and performance."
+            dir,
+            PathBuf::from("/home/claude/.cloudcode/sessions/alpha/workspace")
         );
     }
 
+    // -----------------------------------------------------------------------
+    // is_sendable_file tests
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_extract_response_no_prompt() {
-        let output = "hello\nworld";
-        let result = extract_response(output, "hello");
-        assert_eq!(result, "world");
+    fn test_is_sendable_file_images() {
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.png")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.jpg")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.jpeg")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.gif")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.webp")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/photo.svg")));
     }
 
     #[test]
-    fn test_extract_response_empty() {
-        let output = "hello\n>";
-        let result = extract_response(output, "hello");
-        assert_eq!(result, "");
+    fn test_is_sendable_file_documents() {
+        assert!(is_sendable_file(&PathBuf::from("/tmp/doc.pdf")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/doc.md")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/doc.txt")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/data.json")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/data.csv")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/page.html")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/output.log")));
     }
 
     #[test]
-    fn test_extract_response_message_not_found() {
-        let output = "some output\nmore output\n>";
-        let result = extract_response(output, "not-in-output");
-        assert_eq!(result, "some output\nmore output");
+    fn test_is_sendable_file_case_insensitive() {
+        assert!(is_sendable_file(&PathBuf::from("/tmp/PHOTO.PNG")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/Doc.PDF")));
+    }
+
+    #[test]
+    fn test_is_sendable_file_rejects_binaries() {
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/program.exe")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/lib.so")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/archive.tar.gz")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/binary")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/script.rs")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/code.py")));
+    }
+
+    #[test]
+    fn test_is_sendable_file_no_extension() {
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/Makefile")));
+        assert!(!is_sendable_file(&PathBuf::from("/tmp/.hidden")));
+    }
+
+    // -----------------------------------------------------------------------
+    // snapshot_files tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_snapshot_files_nonexistent_dir() {
+        let result = snapshot_files(&[PathBuf::from("/nonexistent/dir/12345")]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_files_empty_list() {
+        let result = snapshot_files(&[]);
+        assert!(result.is_empty());
     }
 }

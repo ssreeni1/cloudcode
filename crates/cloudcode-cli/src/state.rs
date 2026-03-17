@@ -30,6 +30,11 @@ impl VpsState {
         let path = Self::path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
         }
         let content = serde_json::to_string_pretty(self)?;
         // Write to a tmp file first, then atomically rename to prevent corruption
@@ -192,6 +197,71 @@ mod tests {
         assert!(value.get("server_ip").is_some());
         assert!(value.get("ssh_key_id").is_some());
         assert!(value.get("status").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Partial state tests (for incremental saves / orphaned key cleanup)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn partial_state_ssh_key_only() {
+        let state = VpsState {
+            server_id: None,
+            server_ip: None,
+            ssh_key_id: Some(42),
+            status: Some("creating".to_string()),
+        };
+        assert!(!state.is_provisioned());
+        assert!(state.ssh_key_id.is_some());
+        // This is the partial state that `down` should handle
+    }
+
+    #[test]
+    fn partial_state_needs_cleanup_check() {
+        // After SSH key creation but before server creation
+        let state = VpsState {
+            server_id: None,
+            server_ip: None,
+            ssh_key_id: Some(99),
+            status: Some("creating".to_string()),
+        };
+        // down should check: !is_provisioned() && ssh_key_id.is_some()
+        assert!(!state.is_provisioned() && state.ssh_key_id.is_some());
+    }
+
+    #[test]
+    fn partial_state_no_resources_at_all() {
+        let state = VpsState::default();
+        // down should bail: !is_provisioned() && ssh_key_id.is_none()
+        assert!(!state.is_provisioned() && state.ssh_key_id.is_none());
+    }
+
+    #[test]
+    fn full_state_is_provisioned() {
+        let state = VpsState {
+            server_id: Some(123),
+            server_ip: Some("10.0.0.1".to_string()),
+            ssh_key_id: Some(456),
+            status: Some("running".to_string()),
+        };
+        assert!(state.is_provisioned());
+        // down should proceed with full deprovision
+    }
+
+    #[test]
+    fn json_roundtrip_partial_state_ssh_key_only() {
+        let state = VpsState {
+            server_id: None,
+            server_ip: None,
+            ssh_key_id: Some(42),
+            status: Some("creating".to_string()),
+        };
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let deserialized: VpsState = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.server_id.is_none());
+        assert!(deserialized.server_ip.is_none());
+        assert_eq!(deserialized.ssh_key_id, Some(42));
+        assert_eq!(deserialized.status.as_deref(), Some("creating"));
     }
 
     #[test]

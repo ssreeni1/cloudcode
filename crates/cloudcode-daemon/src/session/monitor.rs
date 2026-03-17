@@ -1,6 +1,6 @@
+use super::manager::SessionManager;
 use anyhow::Result;
 use cloudcode_common::session::{SessionInfo, SessionState};
-use super::manager::SessionManager;
 use tokio::process::Command;
 
 pub struct SessionMonitor {
@@ -20,10 +20,7 @@ impl SessionMonitor {
         for mut session in sessions {
             // Check if the session's window has an active process
             let output = Command::new("tmux")
-                .args([
-                    "list-panes", "-t", &session.name,
-                    "-F", "#{pane_dead}"
-                ])
+                .args(["list-panes", "-t", &session.name, "-F", "#{pane_dead}"])
                 .output()
                 .await;
 
@@ -53,7 +50,10 @@ impl SessionMonitor {
             if session.state == SessionState::Dead {
                 // Clean orphaned output files for dead sessions
                 let _ = tokio::process::Command::new("sh")
-                    .args(["-c", &format!("rm -f /tmp/cloudcode-{}-*.log", session.name)])
+                    .args([
+                        "-c",
+                        &format!("rm -f /tmp/cloudcode-{}-*.log", session.name),
+                    ])
                     .status()
                     .await;
                 if self.manager.kill(&session.name).await.is_ok() {

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
-use crate::state::VpsState;
 use super::daemon_socket_path;
+use crate::config::Config;
+use crate::ssh::ssh_base_args;
+use crate::state::VpsState;
 
 pub struct DaemonClient {
     tunnel: Option<Child>,
@@ -27,19 +28,17 @@ impl DaemonClient {
 
         // Build SSH args — deliberately bypass ControlMaster so the -L
         // forwarding runs on a dedicated connection.
-        let key_path = crate::config::Config::ssh_key_path()?;
-        let args = vec![
-            "-i".to_string(), key_path.to_string_lossy().to_string(),
-            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-            "-o".to_string(), "UserKnownHostsFile=/dev/null".to_string(),
-            "-o".to_string(), "LogLevel=ERROR".to_string(),
-            "-o".to_string(), "ConnectTimeout=10".to_string(),
-            "-o".to_string(), "ControlMaster=no".to_string(),
+        let mut args = ssh_base_args(ip)?;
+        args.extend([
+            "-o".to_string(),
+            "ControlMaster=no".to_string(),
             "-N".to_string(), // no remote command
-            "-o".to_string(), "ExitOnForwardFailure=yes".to_string(),
-            "-L".to_string(), format!("{}:127.0.0.1:7700", socket_path.display()),
+            "-o".to_string(),
+            "ExitOnForwardFailure=yes".to_string(),
+            "-L".to_string(),
+            format!("{}:127.0.0.1:7700", socket_path.display()),
             format!("claude@{}", ip),
-        ];
+        ]);
 
         let tunnel = Command::new("ssh")
             .args(&args)

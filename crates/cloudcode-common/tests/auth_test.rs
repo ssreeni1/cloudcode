@@ -60,14 +60,8 @@ fn tag_key_is_method_not_type() {
     let json = serde_json::to_string(&auth).unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-    assert!(
-        value.get("method").is_some(),
-        "Tag key should be 'method'"
-    );
-    assert!(
-        value.get("type").is_none(),
-        "Tag key should NOT be 'type'"
-    );
+    assert!(value.get("method").is_some(), "Tag key should be 'method'");
+    assert!(value.get("type").is_none(), "Tag key should NOT be 'type'");
 }
 
 #[test]
@@ -79,9 +73,7 @@ fn deserialize_unknown_method_returns_error() {
 
 #[test]
 fn api_key_with_empty_key() {
-    let auth = AuthMethod::ApiKey {
-        key: String::new(),
-    };
+    let auth = AuthMethod::ApiKey { key: String::new() };
     let json = serde_json::to_string(&auth).unwrap();
     let deserialized: AuthMethod = serde_json::from_str(&json).unwrap();
 

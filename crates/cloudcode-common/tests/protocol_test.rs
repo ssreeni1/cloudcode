@@ -269,9 +269,7 @@ mod daemon_response {
 
     #[test]
     fn sessions_roundtrip_empty() {
-        let resp = DaemonResponse::Sessions {
-            sessions: vec![],
-        };
+        let resp = DaemonResponse::Sessions { sessions: vec![] };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
 
@@ -658,10 +656,7 @@ mod newline_delimited_protocol {
 
         assert!(matches!(deserialized[0], DaemonResponse::Sessions { .. }));
         assert!(matches!(deserialized[1], DaemonResponse::Spawned { .. }));
-        assert!(matches!(
-            deserialized[2],
-            DaemonResponse::SendResult { .. }
-        ));
+        assert!(matches!(deserialized[2], DaemonResponse::SendResult { .. }));
         assert!(matches!(deserialized[3], DaemonResponse::Killed { .. }));
         assert!(matches!(deserialized[4], DaemonResponse::Error { .. }));
     }
