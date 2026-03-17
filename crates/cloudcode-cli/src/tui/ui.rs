@@ -707,11 +707,38 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     ])
     .split(area);
 
-    // Header
-    let header = Line::from(vec![
+    // Header with VPS status
+    let vps_status_span = if app.vps_state.is_provisioned() {
+        let ip = app
+            .vps_state
+            .server_ip
+            .as_deref()
+            .unwrap_or("unknown");
+        let status = app
+            .vps_state
+            .status
+            .as_deref()
+            .unwrap_or("unknown");
+        Span::styled(
+            format!("  VPS: {status} ({ip})"),
+            Style::default().fg(GREEN),
+        )
+    } else {
+        Span::styled("  VPS: not provisioned", Style::default().fg(DIM))
+    };
+
+    let mut header_spans = vec![
         Span::styled("  ☁ ", Style::default().fg(BLUE).bold()),
         Span::styled("cloudcode", Style::default().fg(BLUE).bold()),
-    ]);
+    ];
+    // Right-align VPS status
+    let left_len: usize = header_spans.iter().map(|s| s.width()).sum();
+    let right_len = vps_status_span.width();
+    let pad = (layout[0].width as usize).saturating_sub(left_len + right_len + 2);
+    header_spans.push(Span::raw(" ".repeat(pad)));
+    header_spans.push(vps_status_span);
+
+    let header = Line::from(header_spans);
     let header_rect = Rect::new(layout[0].x, layout[0].y + 1, layout[0].width, 1);
     f.render_widget(Paragraph::new(header), header_rect);
 
@@ -719,7 +746,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 
     // Body: help reference or console log
     if app.show_help && app.log_lines.is_empty() && !app.is_command_running() {
-        draw_command_reference(f, layout[2]);
+        draw_command_reference(f, app, layout[2]);
     } else {
         draw_console_log(f, app, layout[2]);
     }
@@ -807,7 +834,7 @@ fn draw_console_log(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Text::from(visible)), body);
 }
 
-fn draw_command_reference(f: &mut Frame, area: Rect) {
+fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
     // (slash_cmd, args, description, cli_equivalent)
@@ -833,7 +860,38 @@ fn draw_command_reference(f: &mut Frame, area: Rect) {
         ("  /quit", "", "Exit cloudcode", ""),
     ];
 
-    let lines: Vec<Line> = commands
+    // VPS status banner
+    let mut lines: Vec<Line> = Vec::new();
+    if app.vps_state.is_provisioned() {
+        let ip = app.vps_state.server_ip.as_deref().unwrap_or("unknown");
+        let status = app.vps_state.status.as_deref().unwrap_or("unknown");
+        lines.push(Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(GREEN).bold()),
+            Span::styled(
+                format!("Active VPS: {status} at {ip}"),
+                Style::default().fg(GREEN),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "    Run /status for details, /spawn to create a session.",
+            Style::default().fg(DIM),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("  ○ ", Style::default().fg(YELLOW)),
+            Span::styled(
+                "No active VPS.",
+                Style::default().fg(YELLOW),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "    Run /up to provision one, or /init to reconfigure.",
+            Style::default().fg(DIM),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    let cmd_lines: Vec<Line> = commands
         .iter()
         .map(|(cmd, args, desc, cli)| {
             if desc.is_empty() && args.is_empty() {
@@ -865,6 +923,7 @@ fn draw_command_reference(f: &mut Frame, area: Rect) {
             }
         })
         .collect();
+    lines.extend(cmd_lines);
 
     f.render_widget(Paragraph::new(Text::from(lines)), body);
 }

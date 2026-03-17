@@ -9,6 +9,7 @@ use tui_input::Input;
 
 use crate::config::{ClaudeConfig, Config, HetznerConfig, TelegramConfig};
 use crate::hetzner::client::HetznerClient;
+use crate::state::VpsState;
 
 use super::steps::{AppMode, InputFocus, ValidationEvent, ValidationStatus, WizardStep};
 
@@ -179,6 +180,7 @@ pub struct App {
     pub step: WizardStep,
     pub config: Config,
     pub existing_config: bool,
+    pub vps_state: VpsState,
 
     // Hetzner
     pub hetzner_input: Input,
@@ -233,6 +235,7 @@ impl App {
     pub fn new(force_wizard: bool) -> Result<Self> {
         let config = Config::load()?;
         let existing_config = config.hetzner.is_some() && config.claude.is_some();
+        let vps_state = VpsState::load().unwrap_or_default();
         let ssh_key_exists = Config::ssh_key_path()
             .map(|p| p.exists())
             .unwrap_or(false);
@@ -251,6 +254,7 @@ impl App {
             step: WizardStep::Welcome,
             config,
             existing_config,
+            vps_state,
 
             hetzner_input: Input::default(),
             hetzner_status: ValidationStatus::Idle,
@@ -627,6 +631,10 @@ impl App {
                         });
                     }
                 }
+                // Reload VPS state in case /up or /down changed it
+                if let Ok(state) = VpsState::load() {
+                    self.vps_state = state;
+                }
             }
         }
     }
@@ -748,9 +756,15 @@ impl App {
                         self.error_message = None;
                     }
                     ParseResult::Ok(SlashCommand::Init) => {
-                        self.mode = AppMode::Wizard;
-                        self.step = WizardStep::Welcome;
-                        self.reset_wizard_state();
+                        if self.vps_state.is_provisioned() {
+                            self.error_message = Some(
+                                "VPS is running. Run /down first to tear it down before re-initializing.".to_string(),
+                            );
+                        } else {
+                            self.mode = AppMode::Wizard;
+                            self.step = WizardStep::Welcome;
+                            self.reset_wizard_state();
+                        }
                     }
                     ParseResult::Ok(cmd) => {
                         if cmd.is_interactive() {
