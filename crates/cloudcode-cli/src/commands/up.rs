@@ -246,7 +246,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
     }
 
     // Step 5: Wait for cloud-init completion
-    let pb = step_bar(5, TOTAL_STEPS, "Waiting for cloud-init to complete...");
+    let pb = step_bar(5, TOTAL_STEPS, "Waiting for cloud-init to complete (this can take 10-20 min)...");
     match health::wait_for_cloud_init(&state, Duration::from_secs(600)).await? {
         CloudInitStatus::Ready => {
             finish_step(&pb, 5, TOTAL_STEPS, "Cloud-init completed successfully");
