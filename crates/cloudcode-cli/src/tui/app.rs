@@ -136,7 +136,10 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
     match cmd {
         "up" => ParseResult::Ok(SlashCommand::Up),
         "down" => ParseResult::Ok(SlashCommand::Down),
-        "spawn" => ParseResult::Ok(SlashCommand::Spawn(arg1.map(String::from))),
+        "spawn" => match arg1 {
+            Some(s) => ParseResult::Ok(SlashCommand::Spawn(Some(s.to_string()))),
+            None => ParseResult::MissingArg("/spawn <name>  (e.g. /spawn my-project)"),
+        },
         "list" | "ls" => ParseResult::Ok(SlashCommand::List),
         "open" | "attach" => match arg1 {
             Some(s) => ParseResult::Ok(SlashCommand::Open(s.to_string())),
