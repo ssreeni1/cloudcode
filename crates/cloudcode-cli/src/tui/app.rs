@@ -329,22 +329,30 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if self.is_command_running() {
-                // First Ctrl+C kills the subprocess
-                self.kill_running_command();
-                self.last_ctrl_c = None;
-            } else {
-                // Double Ctrl+C within 2 seconds to quit
-                let now = std::time::Instant::now();
-                if let Some(prev) = self.last_ctrl_c {
-                    if now.duration_since(prev) < std::time::Duration::from_secs(2) {
-                        self.should_quit = true;
-                        return;
+            match self.mode {
+                AppMode::Wizard => {
+                    // Single Ctrl+C quits during wizard
+                    self.should_quit = true;
+                }
+                AppMode::Main => {
+                    if self.is_command_running() {
+                        // Ctrl+C kills the subprocess
+                        self.kill_running_command();
+                        self.last_ctrl_c = None;
+                    } else {
+                        // Double Ctrl+C within 2 seconds to quit
+                        let now = std::time::Instant::now();
+                        if let Some(prev) = self.last_ctrl_c {
+                            if now.duration_since(prev) < std::time::Duration::from_secs(2) {
+                                self.should_quit = true;
+                                return;
+                            }
+                        }
+                        self.last_ctrl_c = Some(now);
+                        self.error_message =
+                            Some("Press Ctrl+C again to exit cloudcode.".to_string());
                     }
                 }
-                self.last_ctrl_c = Some(now);
-                self.error_message =
-                    Some("Press Ctrl+C again to exit cloudcode.".to_string());
             }
             return;
         }
