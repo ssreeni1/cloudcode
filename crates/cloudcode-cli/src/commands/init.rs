@@ -21,9 +21,7 @@ fn check_required_tools() -> Result<()> {
     let mut missing = Vec::new();
 
     for tool in &tools {
-        let result = ProcessCommand::new("which")
-            .arg(tool)
-            .output();
+        let result = ProcessCommand::new("which").arg(tool).output();
 
         match result {
             Ok(output) if output.status.success() => {}
@@ -45,16 +43,12 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     // Check required tools are available
     check_required_tools()?;
 
-    println!(
-        "\n{}",
-        "Welcome to cloudcode setup!".bold().cyan()
-    );
+    println!("\n{}", "Welcome to cloudcode setup!".bold().cyan());
 
     if auto {
         println!(
             "  {}",
-            "AI-assisted setup is not yet available. Using interactive mode."
-                .yellow()
+            "AI-assisted setup is not yet available. Using interactive mode.".yellow()
         );
     }
 
@@ -98,8 +92,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             }
             println!(
                 "  {}",
-                "Create an account and come back when you have an API token."
-                    .yellow()
+                "Create an account and come back when you have an API token.".yellow()
             );
         }
 
@@ -123,7 +116,11 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 );
             }
             Err(e) => {
-                println!("  {} {}", "✗".red().bold(), format!("Token validation failed: {e}").red());
+                println!(
+                    "  {} {}",
+                    "✗".red().bold(),
+                    format!("Token validation failed: {e}").red()
+                );
                 return Err(e);
             }
         }
@@ -153,10 +150,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         let claude_config = match auth_selection {
             0 => {
                 let url = "https://console.anthropic.com/settings/keys";
-                println!(
-                    "  {}",
-                    "Opening Anthropic Console...".cyan()
-                );
+                println!("  {}", "Opening Anthropic Console...".cyan());
                 if open::that(url).is_err() {
                     println!("  {} {}", "→".dimmed(), url.dimmed());
                 }
@@ -176,12 +170,12 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             }
             1 => {
                 println!(
-                    "  {} OAuth selected. After `cloudcode up`, run:",
+                    "  {} OAuth selected. After /up (or cloudcode up), run:",
                     "✓".green().bold(),
                 );
                 println!(
                     "    {}",
-                    "cloudcode open <session>".bold()
+                    "/open <session> (or cloudcode open <session>)".bold()
                 );
                 println!(
                     "  {}",
@@ -201,7 +195,10 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
 
     // Step 3: Telegram (optional)
     if !reauth {
-        println!("\n{}", "Step 3: Telegram Notifications (Optional)".bold().cyan());
+        println!(
+            "\n{}",
+            "Step 3: Telegram Notifications (Optional)".bold().cyan()
+        );
 
         let setup_telegram = Confirm::new()
             .with_prompt("Would you like to set up Telegram notifications?")
@@ -211,7 +208,8 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         if setup_telegram {
             println!(
                 "  {}",
-                "Create a bot via @BotFather on Telegram: send /newbot and follow the prompts.".dimmed()
+                "Create a bot via @BotFather on Telegram: send /newbot and follow the prompts."
+                    .dimmed()
             );
             let bot_token: String = Input::new()
                 .with_prompt("Enter your Telegram bot token")
@@ -235,17 +233,15 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 owner_id,
             });
 
+            println!("\n  {}", "How to use Telegram with cloudcode:".bold());
             println!(
-                "\n  {}",
-                "How to use Telegram with cloudcode:".bold()
+                "  {}",
+                "After running /up (or cloudcode up), message your bot on Telegram.".dimmed()
             );
             println!(
                 "  {}",
-                "After running `cloudcode up`, message your bot on Telegram.".dimmed()
-            );
-            println!(
-                "  {}",
-                "Send /spawn to create a session, then type messages to interact with Claude.".dimmed()
+                "Send /spawn to create a session, then type messages to interact with Claude."
+                    .dimmed()
             );
             println!(
                 "  {}",
@@ -268,9 +264,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 "-t",
                 "ed25519",
                 "-f",
-                ssh_key_path
-                    .to_str()
-                    .context("Invalid SSH key path")?,
+                ssh_key_path.to_str().context("Invalid SSH key path")?,
                 "-N",
                 "",
                 "-C",
@@ -296,7 +290,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     println!(
         "\n{} {}",
         "✓".green().bold(),
-        "Configuration saved! Run `cloudcode up` to provision your VPS."
+        "Configuration saved! Run /up or `cloudcode up` to provision your VPS."
             .bold()
             .green()
     );

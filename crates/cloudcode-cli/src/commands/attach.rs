@@ -1,15 +1,22 @@
+use crate::config::Config;
+use crate::ssh::ssh_base_args;
+use crate::ssh::tunnel::DaemonClient;
+use crate::state::VpsState;
 use anyhow::{Context, Result};
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
-use crate::config::Config;
-use crate::ssh::tunnel::DaemonClient;
-use crate::state::VpsState;
-use crate::ssh::ssh_base_args;
+
+fn shell_single_quote(value: &str) -> String {
+    // SSH remote commands are parsed by a shell on the remote side.
+    // Wrap the session name in single quotes and escape embedded quotes.
+    let escaped = value.replace('\'', r#"'\''"#);
+    format!("'{}'", escaped)
+}
 
 pub async fn run(session: String) -> Result<()> {
     let state = VpsState::load()?;
     if !state.is_provisioned() {
-        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+        anyhow::bail!("No VPS provisioned. Run /up or `cloudcode up` to provision.");
     }
 
     let ip = state.server_ip.as_ref().context("No server IP in state")?;
@@ -17,18 +24,15 @@ pub async fn run(session: String) -> Result<()> {
     // Pre-attach: check if the session exists via daemon query
     if let Ok(config) = Config::load() {
         if let Ok(mut client) = DaemonClient::connect(&state, &config) {
-            if let Ok(DaemonResponse::Sessions { sessions }) =
-                client.request(&DaemonRequest::List)
+            if let Ok(DaemonResponse::Sessions { sessions }) = client.request(&DaemonRequest::List)
             {
                 let exists = sessions.iter().any(|s| s.name == session);
                 if !exists {
-                    eprintln!(
-                        "{} Session '{}' not found.",
-                        "Error:".red(),
-                        session
-                    );
+                    eprintln!("{} Session '{}' not found.", "Error:".red(), session);
                     if sessions.is_empty() {
-                        eprintln!("No active sessions. Create one with `cloudcode spawn`.");
+                        eprintln!(
+                            "No active sessions. Create one with /spawn or `cloudcode spawn`."
+                        );
                     } else {
                         eprintln!("Available sessions:");
                         for s in &sessions {
@@ -58,10 +62,11 @@ pub async fn run(session: String) -> Result<()> {
     );
 
     let mut args = ssh_base_args(ip)?;
+    let quoted_session = shell_single_quote(&session);
     args.extend([
         "-t".to_string(), // force PTY allocation
         format!("claude@{}", ip),
-        format!("tmux attach-session -t {}", session),
+        format!("tmux attach-session -t {}", quoted_session),
     ]);
 
     let mut cmd = std::process::Command::new("ssh");
@@ -73,7 +78,10 @@ pub async fn run(session: String) -> Result<()> {
     // If the local TERM isn't widely supported (e.g. xterm-ghostty),
     // override to xterm-256color so tmux works on the remote.
     if let Ok(term) = std::env::var("TERM") {
-        if !term.starts_with("xterm-256") && !term.starts_with("screen") && !term.starts_with("tmux") {
+        if !term.starts_with("xterm-256")
+            && !term.starts_with("screen")
+            && !term.starts_with("tmux")
+        {
             cmd.env("TERM", "xterm-256color");
         }
     }
@@ -86,7 +94,7 @@ pub async fn run(session: String) -> Result<()> {
         let code = status.code().unwrap_or(-1);
         if code == 1 {
             eprintln!(
-                "{} Session '{}' not found. Use `cloudcode list` to see available sessions.",
+                "{} Session '{}' not found. Use /list or `cloudcode list` to see available sessions.",
                 "Error:".red(),
                 session
             );
@@ -96,4 +104,22 @@ pub async fn run(session: String) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_single_quote;
+
+    #[test]
+    fn shell_single_quote_wraps_plain_text() {
+        assert_eq!(shell_single_quote("session-123"), "'session-123'");
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_inner_quotes() {
+        assert_eq!(
+            shell_single_quote("a'b\"c; rm -rf /"),
+            "'a'\\''b\"c; rm -rf /'"
+        );
+    }
 }

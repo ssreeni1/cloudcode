@@ -4,7 +4,7 @@ use colored::Colorize;
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::hetzner::client::{estimate_monthly_cost, HetznerClient};
+use crate::hetzner::client::{HetznerClient, estimate_monthly_cost};
 use crate::ssh::health::{self, CloudInitStatus};
 use crate::ssh::tunnel::DaemonClient;
 use crate::state::VpsState;
@@ -14,7 +14,11 @@ pub async fn run() -> Result<()> {
 
     if !state.is_provisioned() {
         println!("{}", "No VPS is currently provisioned.".yellow());
-        println!("Run {} to provision one.", "cloudcode up".bold());
+        println!(
+            "Run {} or {} to provision one.",
+            "/up".bold(),
+            "cloudcode up".bold()
+        );
         return Ok(());
     }
 
@@ -77,7 +81,11 @@ pub async fn run() -> Result<()> {
     // If state is initializing, check cloud-init status
     if state.status.as_deref() == Some("initializing") {
         println!();
-        println!("  {:<12} {}", "Setup:".bold(), "checking cloud-init...".yellow());
+        println!(
+            "  {:<12} {}",
+            "Setup:".bold(),
+            "checking cloud-init...".yellow()
+        );
         match health::wait_for_cloud_init(&state, Duration::from_secs(5)).await {
             Ok(CloudInitStatus::Ready) => {
                 println!("  {:<12} {}", "Cloud-init:".bold(), "ready".green());
@@ -88,13 +96,6 @@ pub async fn run() -> Result<()> {
                     "Cloud-init:".bold(),
                     "failed".red(),
                     error.dimmed()
-                );
-            }
-            Ok(CloudInitStatus::Running) => {
-                println!(
-                    "  {:<12} {}",
-                    "Cloud-init:".bold(),
-                    "still running...".yellow()
                 );
             }
             Err(e) => {

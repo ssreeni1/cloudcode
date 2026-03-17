@@ -10,7 +10,7 @@ pub async fn run(session: String, message: String) -> Result<()> {
     let config = Config::load()?;
     let state = VpsState::load()?;
     if !state.is_provisioned() {
-        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+        anyhow::bail!("No VPS provisioned. Run /up or `cloudcode up` to provision.");
     }
 
     println!("Sending to session '{}'...", session);

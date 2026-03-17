@@ -1,12 +1,12 @@
+use crate::ssh::ssh_base_args;
+use crate::state::VpsState;
 use anyhow::{Context, Result};
 use colored::Colorize;
-use crate::state::VpsState;
-use crate::ssh::ssh_base_args;
 
 pub async fn run(command: Vec<String>) -> Result<()> {
     let state = VpsState::load()?;
     if !state.is_provisioned() {
-        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+        anyhow::bail!("No VPS provisioned. Run /up or `cloudcode up` to provision.");
     }
 
     let ip = state.server_ip.as_ref().context("No server IP in state")?;

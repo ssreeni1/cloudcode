@@ -12,7 +12,7 @@ pub async fn run(name: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let state = VpsState::load()?;
     if !state.is_provisioned() {
-        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+        anyhow::bail!("No VPS provisioned. Run /up or `cloudcode up` to provision.");
     }
 
     // If no name provided and running in a TTY, prompt the user
@@ -37,7 +37,22 @@ pub async fn run(name: Option<String>) -> Result<()> {
     match response {
         DaemonResponse::Spawned { session } => {
             println!("{} Session '{}' created", "✓".green(), session.name);
-            println!("  Open with: cloudcode open {}", session.name);
+            println!(
+                "  Open with: /open {} (or cloudcode open {})",
+                session.name, session.name
+            );
+
+            if let Some(ref claude) = config.claude {
+                if claude.auth_method == "oauth" {
+                    println!(
+                        "\n{}  Run {} (or {}) to complete OAuth login.",
+                        "!".yellow().bold(),
+                        format!("/open {}", session.name).bold(),
+                        format!("cloudcode open {}", session.name).bold()
+                    );
+                    println!("  Highlight and copy the login URL manually (don't press 'c').");
+                }
+            }
         }
         DaemonResponse::Error { message } => {
             eprintln!("{} {}", "Error:".red(), message);

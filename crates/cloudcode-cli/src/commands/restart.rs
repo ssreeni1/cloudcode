@@ -7,16 +7,12 @@ use crate::state::VpsState;
 pub async fn run() -> Result<()> {
     let state = VpsState::load()?;
     if !state.is_provisioned() {
-        anyhow::bail!("No VPS provisioned. Run `cloudcode up` first.");
+        anyhow::bail!("No VPS provisioned. Run /up or `cloudcode up` to provision.");
     }
 
     let ip = state.server_ip.as_ref().context("No server IP in state")?;
 
-    println!(
-        "{} Restarting cloudcode-daemon on {}...",
-        "→".cyan(),
-        ip
-    );
+    println!("{} Restarting cloudcode-daemon on {}...", "→".cyan(), ip);
 
     // Restart the daemon via SSH
     let mut args = ssh_base_args(ip)?;
