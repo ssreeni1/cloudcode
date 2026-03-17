@@ -28,6 +28,13 @@ enum LoopAction {
 /// If `force_wizard` is true, always show the onboarding wizard first.
 /// Otherwise, skip directly to main view if config already exists.
 pub async fn run_tui(force_wizard: bool) -> Result<()> {
+    // Bail early if not running in a real terminal
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        anyhow::bail!(
+            "cloudcode TUI requires a terminal. Run `cloudcode --help` for CLI usage."
+        );
+    }
+
     check_required_tools()?;
 
     let mut app = App::new(force_wizard)?;
