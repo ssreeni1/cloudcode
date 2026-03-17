@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use colored::Colorize;
 use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -12,8 +12,42 @@ pub async fn run(force: bool) -> Result<()> {
     let config = Config::load()?;
     let state = VpsState::load()?;
 
-    if !state.is_provisioned() {
+    if !state.is_provisioned() && state.ssh_key_id.is_none() {
         bail!("No VPS is currently provisioned.");
+    }
+
+    // Handle partial state (SSH key created but server creation failed)
+    if !state.is_provisioned() && state.ssh_key_id.is_some() {
+        println!(
+            "  {} {}",
+            "!".yellow().bold(),
+            "No server found, cleaning up orphaned SSH key...".yellow()
+        );
+
+        match provisioner::deprovision(&state, &config).await {
+            Ok(()) => {
+                VpsState::clear()?;
+                println!(
+                    "  {} {}",
+                    "✓".green(),
+                    "SSH key cleaned up successfully.".green()
+                );
+            }
+            Err(e) => {
+                let err_msg = format!("{e}");
+                if err_msg.contains("404") {
+                    VpsState::clear()?;
+                    println!(
+                        "  {} {}",
+                        "✓".green(),
+                        "SSH key already removed. Local state cleared.".green()
+                    );
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+        return Ok(());
     }
 
     let server_id = state.server_id.unwrap();
@@ -83,11 +117,7 @@ pub async fn run(force: bool) -> Result<()> {
                 let trimmed = input.trim();
                 if trimmed.eq_ignore_ascii_case("y") {
                     VpsState::clear()?;
-                    println!(
-                        "  {} {}",
-                        "✓".green(),
-                        "Local state cleared.".green()
-                    );
+                    println!("  {} {}", "✓".green(), "Local state cleared.".green());
                 } else {
                     println!("  {}", "Aborted. Local state preserved.".yellow());
                 }

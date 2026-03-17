@@ -38,6 +38,9 @@ pub enum Command {
         /// Don't wait for cloud-init to complete
         #[arg(long)]
         no_wait: bool,
+        /// Server type to provision (e.g. cx23, cax11)
+        #[arg(long)]
+        server_type: Option<String>,
     },
     /// Destroy the VPS
     Down {

@@ -61,10 +61,10 @@ pub enum ValidationStatus {
 }
 
 /// Events sent back from async validation tasks.
-#[derive(Debug)]
 pub enum ValidationEvent {
     HetznerResult(Result<(), String>),
     GenerationComplete,
+    ServerTypes(Result<Vec<crate::hetzner::client::ServerTypeInfo>, String>),
 }
 
 /// Top-level mode of the TUI application.

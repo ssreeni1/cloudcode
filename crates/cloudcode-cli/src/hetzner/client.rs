@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +101,48 @@ pub fn estimate_monthly_cost(server_type: &str) -> Option<f64> {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerTypeInfo {
+    pub name: String,
+    pub description: String,
+    pub cores: u32,
+    pub memory: f64,
+    pub disk: u64,
+    /// Locations where this server type is available.
+    pub available_locations: Vec<String>,
+    /// Monthly price (gross) for a specific location, if known.
+    pub monthly_price: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerTypesResponse {
+    server_types: Vec<ServerTypeRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerTypeRaw {
+    name: String,
+    description: String,
+    cores: u32,
+    memory: f64,
+    disk: u64,
+    #[serde(default)]
+    deprecation: Option<serde_json::Value>,
+    #[serde(default)]
+    prices: Vec<ServerTypePrice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerTypePrice {
+    location: String,
+    price_monthly: PriceDetail,
+}
+
+#[derive(Debug, Deserialize)]
+struct PriceDetail {
+    gross: String,
+}
+
 impl HetznerClient {
     pub fn new(api_token: String) -> Self {
         Self {
@@ -112,6 +154,54 @@ impl HetznerClient {
 
     fn auth_header(&self) -> String {
         format!("Bearer {}", self.api_token)
+    }
+
+    /// List available server types, filtering out deprecated ones.
+    /// If `location` is provided, includes pricing for that location and marks availability.
+    pub async fn list_server_types(&self, location: Option<&str>) -> Result<Vec<ServerTypeInfo>> {
+        let resp = self
+            .client
+            .get(format!("{}/server_types?per_page=50", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("Failed to fetch server types")?;
+
+        if !resp.status().is_success() {
+            bail!("Failed to list server types (HTTP {})", resp.status());
+        }
+
+        let data: ServerTypesResponse = resp
+            .json()
+            .await
+            .context("Failed to parse server types response")?;
+
+        let types: Vec<ServerTypeInfo> = data
+            .server_types
+            .into_iter()
+            .filter(|t| t.deprecation.is_none())
+            .map(|t| {
+                let available_locations: Vec<String> =
+                    t.prices.iter().map(|p| p.location.clone()).collect();
+                let monthly_price = location.and_then(|loc| {
+                    t.prices
+                        .iter()
+                        .find(|p| p.location == loc)
+                        .map(|p| p.price_monthly.gross.clone())
+                });
+                ServerTypeInfo {
+                    name: t.name,
+                    description: t.description,
+                    cores: t.cores,
+                    memory: t.memory,
+                    disk: t.disk,
+                    available_locations,
+                    monthly_price,
+                }
+            })
+            .collect();
+
+        Ok(types)
     }
 
     pub async fn validate_token(&self) -> Result<()> {
@@ -164,7 +254,10 @@ impl HetznerClient {
             bail!("Failed to create SSH key (HTTP {status}): {text}");
         }
 
-        let data: CreateSshKeyResponse = resp.json().await.context("Failed to parse SSH key response")?;
+        let data: CreateSshKeyResponse = resp
+            .json()
+            .await
+            .context("Failed to parse SSH key response")?;
         Ok(data.ssh_key.id)
     }
 
@@ -181,16 +274,17 @@ impl HetznerClient {
             bail!("Failed to list SSH keys (HTTP {})", resp.status());
         }
 
-        let data: serde_json::Value = resp.json().await.context("Failed to parse SSH keys response")?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse SSH keys response")?;
         let keys = data["ssh_keys"]
             .as_array()
             .context("Unexpected SSH keys response format")?;
 
         for key in keys {
             if key["name"].as_str() == Some(name) {
-                return key["id"]
-                    .as_u64()
-                    .context("SSH key missing id field");
+                return key["id"].as_u64().context("SSH key missing id field");
             }
         }
 
@@ -248,8 +342,10 @@ impl HetznerClient {
             bail!("Failed to create server (HTTP {status}): {text}");
         }
 
-        let data: CreateServerResponse =
-            resp.json().await.context("Failed to parse server response")?;
+        let data: CreateServerResponse = resp
+            .json()
+            .await
+            .context("Failed to parse server response")?;
         let ip = data.server.public_net.ipv4.ip;
         Ok((data.server.id, ip))
     }
@@ -287,8 +383,10 @@ impl HetznerClient {
             bail!("Failed to get server (HTTP {status}): {text}");
         }
 
-        let data: GetServerResponse =
-            resp.json().await.context("Failed to parse server response")?;
+        let data: GetServerResponse = resp
+            .json()
+            .await
+            .context("Failed to parse server response")?;
         Ok(ServerInfo {
             id: data.server.id,
             name: data.server.name,

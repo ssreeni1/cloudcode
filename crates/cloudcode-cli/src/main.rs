@@ -31,7 +31,10 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // All other subcommands run directly (no TUI)
-        Some(Command::Up { no_wait }) => commands::up::run(no_wait).await,
+        Some(Command::Up {
+            no_wait,
+            server_type,
+        }) => commands::up::run(no_wait, server_type).await,
         Some(Command::Down { force }) => commands::down::run(force).await,
         Some(Command::Status) => commands::status::run().await,
         Some(Command::Spawn { name }) => commands::spawn::run(name).await,

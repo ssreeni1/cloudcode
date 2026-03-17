@@ -6,13 +6,13 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
-use ratatui::prelude::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::prelude::CrosstermBackend;
 
 use app::{App, SlashCommand};
 
@@ -30,9 +30,7 @@ enum LoopAction {
 pub async fn run_tui(force_wizard: bool) -> Result<()> {
     // Bail early if not running in a real terminal
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        anyhow::bail!(
-            "cloudcode TUI requires a terminal. Run `cloudcode --help` for CLI usage."
-        );
+        anyhow::bail!("cloudcode TUI requires a terminal. Run `cloudcode --help` for CLI usage.");
     }
 
     check_required_tools()?;
@@ -107,7 +105,6 @@ async fn execute_interactive(cmd: SlashCommand) {
     let result = match cmd {
         SlashCommand::Open(session) => crate::commands::attach::run(session).await,
         SlashCommand::Ssh(command) => crate::commands::ssh_cmd::run(command).await,
-        SlashCommand::Down => crate::commands::down::run(false).await,
         _ => Ok(()),
     };
 

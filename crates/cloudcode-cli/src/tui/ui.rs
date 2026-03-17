@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
-use ratatui::Frame;
 
 use super::app::App;
 use super::steps::{AppMode, InputFocus, ValidationStatus, WizardStep};
@@ -114,7 +114,7 @@ fn draw_step(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::vertical([
         Constraint::Length(2), // header
         Constraint::Length(1), // separator
-        Constraint::Min(6),   // body
+        Constraint::Min(6),    // body
         Constraint::Length(1), // separator
         Constraint::Length(1), // footer
     ])
@@ -377,11 +377,11 @@ fn draw_oauth_warning(f: &mut Frame, area: Rect) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "1. cloudcode spawn",
+            "1. /spawn (or cloudcode spawn)",
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "2. cloudcode open <session-name>",
+            "2. /open <session> (or cloudcode open <session>)",
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
@@ -393,10 +393,7 @@ fn draw_oauth_warning(f: &mut Frame, area: Rect) {
             Style::default().fg(Color::White),
         )),
         Line::from(vec![
-            Span::styled(
-                "   ⚠  Do NOT press 'c'",
-                Style::default().fg(YELLOW).bold(),
-            ),
+            Span::styled("   ⚠  Do NOT press 'c'", Style::default().fg(YELLOW).bold()),
             Span::styled(" — that copies to the", Style::default().fg(YELLOW)),
         ]),
         Line::from(Span::styled(
@@ -532,9 +529,7 @@ fn draw_telegram(f: &mut Frame, app: &App, area: Rect) {
                 body.y + 3,
             ),
             InputFocus::Secondary => (
-                body.x
-                    + "Owner ID:  ".len() as u16
-                    + app.telegram_id_input.visual_cursor() as u16,
+                body.x + "Owner ID:  ".len() as u16 + app.telegram_id_input.visual_cursor() as u16,
                 body.y + 4,
             ),
         };
@@ -585,10 +580,7 @@ fn draw_generating(f: &mut Frame, app: &App, area: Rect) {
                 format!("{} ", app.spinner_char()),
                 Style::default().fg(BLUE),
             ),
-            Span::styled(
-                "Saving configuration...",
-                Style::default().fg(Color::White),
-            ),
+            Span::styled("Saving configuration...", Style::default().fg(Color::White)),
         ])
     };
 
@@ -619,10 +611,7 @@ fn draw_complete(f: &mut Frame, app: &App, area: Rect) {
 
     if let Some(ref h) = app.config.hetzner {
         lines.push(Line::from(vec![
-            Span::styled(
-                "  Hetzner:   ",
-                Style::default().fg(Color::White).bold(),
-            ),
+            Span::styled("  Hetzner:   ", Style::default().fg(Color::White).bold()),
             Span::styled(App::mask_secret(&h.api_token), Style::default().fg(DIM)),
             Span::styled("            ✓", Style::default().fg(GREEN)),
         ]));
@@ -632,7 +621,10 @@ fn draw_complete(f: &mut Frame, app: &App, area: Rect) {
         let auth_display = if c.auth_method == "api_key" {
             format!(
                 "API Key ({})",
-                c.api_key.as_deref().map(App::mask_secret).unwrap_or_default()
+                c.api_key
+                    .as_deref()
+                    .map(App::mask_secret)
+                    .unwrap_or_default()
             )
         } else {
             "OAuth".to_string()
@@ -645,19 +637,13 @@ fn draw_complete(f: &mut Frame, app: &App, area: Rect) {
 
     if let Some(ref t) = app.config.telegram {
         lines.push(Line::from(vec![
-            Span::styled(
-                "  Telegram:  ",
-                Style::default().fg(Color::White).bold(),
-            ),
+            Span::styled("  Telegram:  ", Style::default().fg(Color::White).bold()),
             Span::styled(App::mask_secret(&t.bot_token), Style::default().fg(DIM)),
             Span::styled("       ✓", Style::default().fg(GREEN)),
         ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(
-                "  Telegram:  ",
-                Style::default().fg(Color::White).bold(),
-            ),
+            Span::styled("  Telegram:  ", Style::default().fg(Color::White).bold()),
             Span::styled("skipped", Style::default().fg(DIM)),
         ]));
     }
@@ -677,17 +663,14 @@ fn draw_complete(f: &mut Frame, app: &App, area: Rect) {
     if app.is_oauth() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  Remember: run /up, then /spawn + /open to log in.",
+            "  Run /up, then /spawn + /open to complete OAuth login.",
             Style::default().fg(YELLOW),
         )));
     }
 
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 
-    let help = Line::from(Span::styled(
-        "  Enter: continue",
-        Style::default().fg(DIM),
-    ));
+    let help = Line::from(Span::styled("  Enter: continue", Style::default().fg(DIM)));
     let help_rect = Rect::new(rect.x, rect.y + rect.height, rect.width, 1);
     if help_rect.y < area.height {
         f.render_widget(Paragraph::new(help), help_rect);
@@ -700,25 +683,18 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     let layout = Layout::vertical([
         Constraint::Length(2), // header
         Constraint::Length(1), // separator
-        Constraint::Min(10),  // body
+        Constraint::Min(10),   // body
         Constraint::Length(1), // separator
         Constraint::Length(1), // status / error line
+        Constraint::Length(1), // hint line
         Constraint::Length(1), // input line
     ])
     .split(area);
 
     // Header with VPS status
     let vps_status_span = if app.vps_state.is_provisioned() {
-        let ip = app
-            .vps_state
-            .server_ip
-            .as_deref()
-            .unwrap_or("unknown");
-        let status = app
-            .vps_state
-            .status
-            .as_deref()
-            .unwrap_or("unknown");
+        let ip = app.vps_state.server_ip.as_deref().unwrap_or("unknown");
+        let status = app.vps_state.status.as_deref().unwrap_or("unknown");
         Span::styled(
             format!("  VPS: {status} ({ip})"),
             Style::default().fg(GREEN),
@@ -744,8 +720,10 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 
     draw_separator(f, layout[1]);
 
-    // Body: help reference or console log
-    if app.show_help && app.log_lines.is_empty() && !app.is_command_running() {
+    // Body: server type picker, help reference, or console log
+    if app.server_type_picker.is_some() {
+        draw_server_type_picker(f, app, layout[2]);
+    } else if app.show_help && app.log_lines.is_empty() && !app.is_command_running() {
         draw_command_reference(f, app, layout[2]);
     } else {
         draw_console_log(f, app, layout[2]);
@@ -770,6 +748,15 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
         ]);
         f.render_widget(Paragraph::new(line), layout[4]);
     }
+
+    // Hint line
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  Type /help for a list of commands",
+            Style::default().fg(DIM),
+        ))),
+        layout[5],
+    );
 
     // Input line
     let input_value = app.command_input.value();
@@ -797,10 +784,10 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
             "  > /".len(),
         )
     };
-    f.render_widget(Paragraph::new(input_line), layout[5]);
+    f.render_widget(Paragraph::new(input_line), layout[6]);
 
-    let cursor_x = layout[5].x + prompt_len as u16 + cursor_pos as u16;
-    let cursor_y = layout[5].y;
+    let cursor_x = layout[6].x + prompt_len as u16 + cursor_pos as u16;
+    let cursor_y = layout[6].y;
     if cursor_y < area.y + area.height {
         f.set_cursor_position((cursor_x, cursor_y));
     }
@@ -812,7 +799,30 @@ fn draw_console_log(f: &mut Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Command header
+    // History entries
+    for entry in &app.history {
+        let status_span = if entry.exit_ok {
+            Span::styled("  ✓", Style::default().fg(GREEN).bold())
+        } else {
+            Span::styled("  ✗", Style::default().fg(RED).bold())
+        };
+        lines.push(Line::from(vec![
+            Span::styled("> ", Style::default().fg(DIM)),
+            Span::styled(entry.command.as_str(), Style::default().fg(DIM).bold()),
+            status_span,
+        ]));
+        for log_line in &entry.lines {
+            let style = if log_line.is_error {
+                Style::default().fg(RED).dim()
+            } else {
+                Style::default().fg(DIM)
+            };
+            lines.push(Line::from(Span::styled(&log_line.text, style)));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Current command header
     if let Some(ref cmd_name) = app.running_command {
         let status_span = if app.command_done {
             Span::styled("  ✓", Style::default().fg(GREEN).bold())
@@ -830,14 +840,15 @@ fn draw_console_log(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(""));
     }
 
-    // Output lines
+    // Current output lines
     for log_line in &app.log_lines {
+        let clean = strip_ansi(&log_line.text);
         let style = if log_line.is_error {
             Style::default().fg(RED)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(BLUE)
         };
-        lines.push(Line::from(Span::styled(&log_line.text, style)));
+        lines.push(Line::from(Span::styled(clean, style)));
     }
 
     // Scrolling: show last N lines, offset by log_scroll
@@ -850,6 +861,130 @@ fn draw_console_log(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Text::from(visible)), body);
 }
 
+fn draw_server_type_picker(f: &mut Frame, app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+    let mut lines: Vec<Line> = Vec::new();
+
+    let picker = app.server_type_picker.as_ref().unwrap();
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Select a server type for provisioning",
+            Style::default().fg(Color::White).bold(),
+        ),
+        Span::styled(
+            format!("  (location: {})", picker.location),
+            Style::default().fg(DIM),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    if picker.loading {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", app.spinner_char()),
+                Style::default().fg(BLUE),
+            ),
+            Span::styled(
+                "Fetching available server types...",
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    } else if picker.types.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No server types available.",
+            Style::default().fg(RED),
+        )));
+    } else {
+        // Header
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<12} {:<6} {:<8} {:<8} {:<12} {}",
+                "Name", "CPUs", "RAM", "Disk", "Cost/mo", "Status"
+            ),
+            Style::default().fg(DIM),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", "─".repeat(62)),
+            Style::default().fg(DIM),
+        )));
+
+        for (i, st) in picker.types.iter().enumerate() {
+            let is_selected = i == picker.selected;
+            let available_here = st.available_locations.contains(&picker.location);
+
+            let prefix = if is_selected { "› " } else { "  " };
+
+            let cost_str = if let Some(ref price) = st.monthly_price {
+                // Use real API price for the configured location
+                if let Ok(val) = price.parse::<f64>() {
+                    format!("${:.2}", val)
+                } else {
+                    price.clone()
+                }
+            } else {
+                "—".to_string()
+            };
+
+            let status = if available_here {
+                "✓ available"
+            } else {
+                "✗ unavailable"
+            };
+
+            let style = if !available_here {
+                Style::default().fg(DIM)
+            } else if is_selected {
+                Style::default().fg(BLUE).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let status_style = if !available_here {
+                Style::default().fg(RED).dim()
+            } else if is_selected {
+                Style::default().fg(GREEN).bold()
+            } else {
+                Style::default().fg(GREEN)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "{}{:<12} {:<6} {:<8} {:<8} {:<12} ",
+                        prefix,
+                        st.name,
+                        format!("{}x", st.cores),
+                        format!("{:.0} GB", st.memory),
+                        format!("{} GB", st.disk),
+                        cost_str,
+                    ),
+                    style,
+                ),
+                Span::styled(status, status_style),
+                Span::styled(format!("  {}", st.description), Style::default().fg(DIM)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ↑↓: select  ·  Enter: confirm  ·  Esc: cancel",
+            Style::default().fg(DIM),
+        )));
+    }
+
+    let available = body.height as usize;
+    // Scroll if list is longer than available space
+    let total = lines.len();
+    if total > available {
+        let skip = total.saturating_sub(available);
+        let visible: Vec<Line> = lines.into_iter().skip(skip).take(available).collect();
+        f.render_widget(Paragraph::new(Text::from(visible)), body);
+    } else {
+        f.render_widget(Paragraph::new(Text::from(lines)), body);
+    }
+}
+
 fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
@@ -858,22 +993,56 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
         ("VPS & Sessions", "", "", ""),
         ("  /up", "", "Provision VPS", "cloudcode up"),
         ("  /down", "", "Destroy VPS", "cloudcode down"),
-        ("  /status", "", "Show VPS & session status", "cloudcode status"),
-        ("  /spawn", " [name]", "Create a Claude session", "cloudcode spawn"),
+        (
+            "  /status",
+            "",
+            "Show VPS & session status",
+            "cloudcode status",
+        ),
+        (
+            "  /spawn",
+            " [name]",
+            "Create a Claude session",
+            "cloudcode spawn",
+        ),
         ("  /list", "", "List active sessions", "cloudcode list"),
-        ("  /open", " <session>", "Open session interactively", "cloudcode open <s>"),
-        ("  /send", " <s> <msg>", "Send message to session", "cloudcode send <s> <m>"),
-        ("  /kill", " <session>", "Kill a session", "cloudcode kill <s>"),
+        (
+            "  /open",
+            " <session>",
+            "Open session interactively",
+            "cloudcode open <s>",
+        ),
+        (
+            "  /send",
+            " <s> <msg>",
+            "Send message to session",
+            "cloudcode send <s> <m>",
+        ),
+        (
+            "  /kill",
+            " <session>",
+            "Kill a session",
+            "cloudcode kill <s>",
+        ),
         ("", "", "", ""),
         ("System", "", "", ""),
-        ("  /restart", "", "Restart daemon on VPS", "cloudcode restart"),
-        ("  /logs", " [target]", "View logs (setup/daemon)", "cloudcode logs"),
+        (
+            "  /restart",
+            "",
+            "Restart daemon on VPS",
+            "cloudcode restart",
+        ),
+        (
+            "  /logs",
+            " [target]",
+            "View logs (setup/daemon)",
+            "cloudcode logs",
+        ),
         ("  /ssh", " [cmd]", "SSH to the VPS", "cloudcode ssh"),
         ("", "", "", ""),
         ("Other", "", "", ""),
         ("  /init", "", "Re-run setup wizard", "cloudcode init"),
         ("  /help", "", "Show this reference", ""),
-        ("  /quit", "", "Exit cloudcode", ""),
     ];
 
     // VPS status banner
@@ -889,19 +1058,16 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
         lines.push(Line::from(Span::styled(
-            "    Run /status for details, /spawn to create a session.",
+            "    Run /status (or cloudcode status) for details, /spawn to create a session.",
             Style::default().fg(DIM),
         )));
     } else {
         lines.push(Line::from(vec![
             Span::styled("  ○ ", Style::default().fg(YELLOW)),
-            Span::styled(
-                "No active VPS.",
-                Style::default().fg(YELLOW),
-            ),
+            Span::styled("No active VPS.", Style::default().fg(YELLOW)),
         ]));
         lines.push(Line::from(Span::styled(
-            "    Run /up to provision one, or /init to reconfigure.",
+            "    Run /up (or cloudcode up) to provision one, or /init to reconfigure.",
             Style::default().fg(DIM),
         )));
     }
@@ -914,10 +1080,7 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
                 if cmd.is_empty() {
                     Line::from("")
                 } else {
-                    Line::from(Span::styled(
-                        *cmd,
-                        Style::default().fg(Color::White).bold(),
-                    ))
+                    Line::from(Span::styled(*cmd, Style::default().fg(Color::White).bold()))
                 }
             } else {
                 let cmd_width = 12;
@@ -930,10 +1093,7 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
                     Span::styled(*desc, Style::default().fg(Color::White)),
                 ];
                 if !cli.is_empty() {
-                    spans.push(Span::styled(
-                        format!("  ({cli})"),
-                        Style::default().fg(DIM),
-                    ));
+                    spans.push(Span::styled(format!("  ({cli})"), Style::default().fg(DIM)));
                 }
                 Line::from(spans)
             }
@@ -942,4 +1102,27 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
     lines.extend(cmd_lines);
 
     f.render_widget(Paragraph::new(Text::from(lines)), body);
+}
+
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC [ ... m sequences
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

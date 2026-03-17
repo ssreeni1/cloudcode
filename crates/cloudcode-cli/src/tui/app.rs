@@ -1,14 +1,14 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::process::Command as ProcessCommand;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::mpsc;
-use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
 
 use crate::config::{ClaudeConfig, Config, HetznerConfig, TelegramConfig};
-use crate::hetzner::client::HetznerClient;
+use crate::hetzner::client::{HetznerClient, ServerTypeInfo};
 use crate::state::VpsState;
 
 use super::steps::{AppMode, InputFocus, ValidationEvent, ValidationStatus, WizardStep};
@@ -18,6 +18,13 @@ use super::steps::{AppMode, InputFocus, ValidationEvent, ValidationStatus, Wizar
 pub struct LogLine {
     pub text: String,
     pub is_error: bool,
+}
+
+/// A completed command and its output, kept for history.
+pub struct HistoryEntry {
+    pub command: String,
+    pub lines: Vec<LogLine>,
+    pub exit_ok: bool,
 }
 
 pub enum LogEvent {
@@ -37,6 +44,17 @@ pub struct InlinePrompt {
 
 pub enum PromptCallback {
     Spawn,
+    DownConfirm,
+}
+
+// ── Server type picker ──────────────────────────────────────────────────
+
+pub struct ServerTypePicker {
+    pub types: Vec<ServerTypeInfo>,
+    pub selected: usize,
+    pub loading: bool,
+    /// The configured location, used to show availability.
+    pub location: String,
 }
 
 // ── Slash commands ──────────────────────────────────────────────────────
@@ -64,7 +82,6 @@ impl SlashCommand {
         match self {
             Self::Open(_) => true,
             Self::Ssh(args) => args.is_empty(), // no args = interactive shell
-            Self::Down => true,                 // has confirmation prompt
             _ => false,
         }
     }
@@ -156,9 +173,7 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
             None => ParseResult::MissingArg("/open <session>"),
         },
         "send" => match (arg1, arg2) {
-            (Some(s), Some(m)) => {
-                ParseResult::Ok(SlashCommand::Send(s.to_string(), m.to_string()))
-            }
+            (Some(s), Some(m)) => ParseResult::Ok(SlashCommand::Send(s.to_string(), m.to_string())),
             _ => ParseResult::MissingArg("/send <session> <message>"),
         },
         "kill" => match arg1 {
@@ -238,6 +253,10 @@ pub struct App {
     pub command_done: bool,
     pub show_help: bool,
     pub log_scroll: usize,
+    /// History of completed commands and their output.
+    pub history: Vec<HistoryEntry>,
+    /// Server type picker for /up command.
+    pub server_type_picker: Option<ServerTypePicker>,
     /// PID of the running subprocess (0 = none). Used by Ctrl+C to kill it.
     pub child_pid: Arc<AtomicU32>,
 
@@ -252,9 +271,7 @@ impl App {
         let config = Config::load()?;
         let existing_config = config.hetzner.is_some() && config.claude.is_some();
         let vps_state = VpsState::load().unwrap_or_default();
-        let ssh_key_exists = Config::ssh_key_path()
-            .map(|p| p.exists())
-            .unwrap_or(false);
+        let ssh_key_exists = Config::ssh_key_path().map(|p| p.exists()).unwrap_or(false);
 
         let (validation_tx, validation_rx) = mpsc::unbounded_channel();
         let (log_tx, log_rx) = mpsc::unbounded_channel();
@@ -304,6 +321,8 @@ impl App {
             command_done: false,
             show_help: true,
             log_scroll: 0,
+            history: Vec::new(),
+            server_type_picker: None,
             child_pid: Arc::new(AtomicU32::new(0)),
 
             should_quit: false,
@@ -626,6 +645,28 @@ impl App {
                 }
                 self.step = WizardStep::Complete;
             }
+            ValidationEvent::ServerTypes(result) => {
+                if let Some(ref mut picker) = self.server_type_picker {
+                    picker.loading = false;
+                    match result {
+                        Ok(mut types) => {
+                            // Sort by cores then memory for a logical ordering
+                            types.sort_by(|a, b| {
+                                a.cores.cmp(&b.cores).then(
+                                    a.memory
+                                        .partial_cmp(&b.memory)
+                                        .unwrap_or(std::cmp::Ordering::Equal),
+                                )
+                            });
+                            picker.types = types;
+                        }
+                        Err(e) => {
+                            self.server_type_picker = None;
+                            self.error_message = Some(format!("Failed to fetch server types: {e}"));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -666,13 +707,26 @@ impl App {
 
     // ── Spawn captured command ──────────────────────────────────────────
 
+    /// Move current command output into history (if any).
+    fn flush_to_history(&mut self) {
+        if let Some(cmd_name) = self.running_command.take() {
+            let lines = std::mem::take(&mut self.log_lines);
+            self.history.push(HistoryEntry {
+                command: cmd_name,
+                lines,
+                exit_ok: self.command_done,
+            });
+            self.command_done = false;
+        }
+    }
+
     pub fn spawn_captured_command(&mut self, cmd: SlashCommand) {
         let display = cmd.display_name();
         let args = cmd.to_cli_args();
         let tx = self.log_tx.clone();
         let pid_ref = self.child_pid.clone();
 
-        self.log_lines.clear();
+        self.flush_to_history();
         self.running_command = Some(display);
         self.command_done = false;
         self.show_help = false;
@@ -752,6 +806,12 @@ impl App {
     // ── Main view handler ───────────────────────────────────────────────
 
     fn handle_main_key(&mut self, key: KeyEvent) {
+        // If server type picker is active, handle it
+        if self.server_type_picker.is_some() {
+            self.handle_server_picker_key(key);
+            return;
+        }
+
         // If an inline prompt is active, handle it separately
         if self.inline_prompt.is_some() {
             self.handle_prompt_key(key);
@@ -777,13 +837,13 @@ impl App {
                 match parse_slash_command(&input) {
                     ParseResult::Empty => {}
                     ParseResult::Ok(SlashCommand::Quit) => {
-                        self.should_quit = true;
+                        // /quit is not available in the TUI. Use Ctrl+C twice to exit.
+                        self.error_message =
+                            Some("Press Ctrl+C twice to exit cloudcode.".to_string());
                     }
                     ParseResult::Ok(SlashCommand::Help) => {
+                        self.flush_to_history();
                         self.show_help = true;
-                        self.log_lines.clear();
-                        self.running_command = None;
-                        self.command_done = false;
                         self.error_message = None;
                     }
                     ParseResult::Ok(SlashCommand::Init) => {
@@ -796,6 +856,56 @@ impl App {
                             self.step = WizardStep::Welcome;
                             self.reset_wizard_state();
                         }
+                    }
+                    ParseResult::Ok(SlashCommand::Up) => {
+                        // Show server type picker before provisioning
+                        self.error_message = None;
+                        self.show_help = false;
+                        let location = self
+                            .config
+                            .vps
+                            .as_ref()
+                            .and_then(|v| v.location.as_deref())
+                            .unwrap_or("nbg1")
+                            .to_string();
+                        self.server_type_picker = Some(ServerTypePicker {
+                            types: Vec::new(),
+                            selected: 0,
+                            loading: true,
+                            location: location.clone(),
+                        });
+                        // Fetch server types asynchronously
+                        if let Some(ref hetzner) = self.config.hetzner {
+                            let tx = self.validation_tx.clone();
+                            let token = hetzner.api_token.clone();
+                            tokio::spawn(async move {
+                                let client = HetznerClient::new(token);
+                                let result = client.list_server_types(Some(&location)).await;
+                                let event = match result {
+                                    Ok(types) => {
+                                        super::steps::ValidationEvent::ServerTypes(Ok(types))
+                                    }
+                                    Err(e) => super::steps::ValidationEvent::ServerTypes(Err(
+                                        e.to_string()
+                                    )),
+                                };
+                                let _ = tx.send(event);
+                            });
+                        } else {
+                            self.server_type_picker = None;
+                            self.error_message =
+                                Some("Hetzner not configured. Run /init first.".to_string());
+                        }
+                    }
+                    ParseResult::Ok(SlashCommand::Down) => {
+                        // Inline confirmation before destroying VPS
+                        self.inline_prompt = Some(InlinePrompt {
+                            label: "Destroy VPS? This cannot be undone. Type 'yes' to confirm: "
+                                .to_string(),
+                            callback: PromptCallback::DownConfirm,
+                        });
+                        self.command_input.reset();
+                        self.error_message = None;
                     }
                     ParseResult::Ok(SlashCommand::Spawn(None)) => {
                         // Prompt for session name inline
@@ -824,9 +934,8 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                if !self.is_command_running() {
-                    self.should_quit = true;
-                }
+                // Esc clears the input, doesn't quit
+                self.command_input.reset();
             }
             _ => {
                 self.command_input
@@ -846,12 +955,16 @@ impl App {
                 let prompt = self.inline_prompt.take().unwrap();
                 match prompt.callback {
                     PromptCallback::Spawn => {
-                        let name = if input.is_empty() {
-                            None
-                        } else {
-                            Some(input)
-                        };
+                        let name = if input.is_empty() { None } else { Some(input) };
                         self.spawn_captured_command(SlashCommand::Spawn(name));
+                    }
+                    PromptCallback::DownConfirm => {
+                        if input.eq_ignore_ascii_case("yes") {
+                            // Run /down --force as a captured command
+                            self.spawn_down_force();
+                        } else {
+                            self.error_message = Some("Aborted.".to_string());
+                        }
                     }
                 }
             }
@@ -864,6 +977,208 @@ impl App {
                     .handle_event(&crossterm::event::Event::Key(key));
             }
         }
+    }
+
+    fn handle_server_picker_key(&mut self, key: KeyEvent) {
+        let picker = self.server_type_picker.as_mut().unwrap();
+        if picker.loading {
+            if key.code == KeyCode::Esc {
+                self.server_type_picker = None;
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if picker.selected > 0 {
+                    picker.selected -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !picker.types.is_empty() && picker.selected < picker.types.len() - 1 {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let location = picker.location.clone();
+                if let Some(selected) = picker.types.get(picker.selected) {
+                    if !selected.available_locations.contains(&location) {
+                        self.error_message = Some(format!(
+                            "'{}' is not available in location '{}'. Pick another type.",
+                            selected.name, location
+                        ));
+                        return;
+                    }
+                    let server_type = selected.name.clone();
+                    self.server_type_picker = None;
+                    self.spawn_up_with_server_type(server_type);
+                }
+            }
+            KeyCode::Esc => {
+                self.server_type_picker = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn spawn_up_with_server_type(&mut self, server_type: String) {
+        let tx = self.log_tx.clone();
+        let pid_ref = self.child_pid.clone();
+        let display = format!("/up --server-type {server_type}");
+
+        self.flush_to_history();
+        self.running_command = Some(display);
+        self.command_done = false;
+        self.show_help = false;
+        self.log_scroll = 0;
+        self.error_message = None;
+        self.child_pid.store(0, Ordering::SeqCst);
+
+        tokio::spawn(async move {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = tx.send(LogEvent::Stderr(format!("Failed to find executable: {e}")));
+                    let _ = tx.send(LogEvent::Done(None));
+                    return;
+                }
+            };
+
+            let mut child = match ProcessCommand::new(&exe)
+                .args(["up", "--server-type", &server_type])
+                .env("NO_COLOR", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(LogEvent::Stderr(format!("Failed to run: {e}")));
+                    let _ = tx.send(LogEvent::Done(None));
+                    return;
+                }
+            };
+
+            pid_ref.store(child.id(), Ordering::SeqCst);
+
+            let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+
+            let tx2 = tx.clone();
+            let stdout_handle = tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx2.send(LogEvent::Stdout(l));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let tx3 = tx.clone();
+            let stderr_handle = tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx3.send(LogEvent::Stderr(l));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+
+            let status = child.wait().ok().and_then(|s| s.code());
+            pid_ref.store(0, Ordering::SeqCst);
+            let _ = tx.send(LogEvent::Done(status));
+        });
+    }
+
+    fn spawn_down_force(&mut self) {
+        let tx = self.log_tx.clone();
+        let pid_ref = self.child_pid.clone();
+
+        self.flush_to_history();
+        self.running_command = Some("/down --force".to_string());
+        self.command_done = false;
+        self.show_help = false;
+        self.log_scroll = 0;
+        self.error_message = None;
+        self.child_pid.store(0, Ordering::SeqCst);
+
+        tokio::spawn(async move {
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    let _ = tx.send(LogEvent::Stderr(format!("Failed to find executable: {e}")));
+                    let _ = tx.send(LogEvent::Done(None));
+                    return;
+                }
+            };
+
+            let mut child = match ProcessCommand::new(&exe)
+                .args(["down", "--force"])
+                .env("NO_COLOR", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(LogEvent::Stderr(format!("Failed to run: {e}")));
+                    let _ = tx.send(LogEvent::Done(None));
+                    return;
+                }
+            };
+
+            pid_ref.store(child.id(), Ordering::SeqCst);
+
+            let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+
+            let tx2 = tx.clone();
+            let stdout_handle = tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx2.send(LogEvent::Stdout(l));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let tx3 = tx.clone();
+            let stderr_handle = tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => {
+                            let _ = tx3.send(LogEvent::Stderr(l));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+
+            let status = child.wait().ok().and_then(|s| s.code());
+            pid_ref.store(0, Ordering::SeqCst);
+            let _ = tx.send(LogEvent::Done(status));
+        });
     }
 
     fn reset_wizard_state(&mut self) {
