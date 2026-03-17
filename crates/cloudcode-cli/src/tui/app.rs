@@ -26,6 +26,19 @@ pub enum LogEvent {
     Done(Option<i32>),
 }
 
+// ── Inline prompt ───────────────────────────────────────────────────────
+
+/// An inline prompt shown in the input bar (e.g. "Session name:").
+/// `callback` is called with the user's input when they press Enter.
+pub struct InlinePrompt {
+    pub label: String,
+    pub callback: PromptCallback,
+}
+
+pub enum PromptCallback {
+    Spawn,
+}
+
 // ── Slash commands ──────────────────────────────────────────────────────
 
 pub enum SlashCommand {
@@ -136,10 +149,7 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
     match cmd {
         "up" => ParseResult::Ok(SlashCommand::Up),
         "down" => ParseResult::Ok(SlashCommand::Down),
-        "spawn" => match arg1 {
-            Some(s) => ParseResult::Ok(SlashCommand::Spawn(Some(s.to_string()))),
-            None => ParseResult::MissingArg("/spawn <name>  (e.g. /spawn my-project)"),
-        },
+        "spawn" => ParseResult::Ok(SlashCommand::Spawn(arg1.map(String::from))),
         "list" | "ls" => ParseResult::Ok(SlashCommand::List),
         "open" | "attach" => match arg1 {
             Some(s) => ParseResult::Ok(SlashCommand::Open(s.to_string())),
@@ -216,6 +226,9 @@ pub struct App {
     pub error_message: Option<String>,
     /// Set when an interactive command needs TUI suspension.
     pub pending_command: Option<SlashCommand>,
+    /// Inline prompt: (label, callback that takes the input string).
+    /// When set, the input bar shows the label instead of `> /`.
+    pub inline_prompt: Option<InlinePrompt>,
 
     // Console log
     pub log_tx: mpsc::UnboundedSender<LogEvent>,
@@ -282,6 +295,7 @@ impl App {
             command_input: Input::default(),
             error_message: None,
             pending_command: None,
+            inline_prompt: None,
 
             log_tx,
             log_rx,
@@ -738,6 +752,12 @@ impl App {
     // ── Main view handler ───────────────────────────────────────────────
 
     fn handle_main_key(&mut self, key: KeyEvent) {
+        // If an inline prompt is active, handle it separately
+        if self.inline_prompt.is_some() {
+            self.handle_prompt_key(key);
+            return;
+        }
+
         match key.code {
             KeyCode::PageUp => {
                 self.log_scroll = self.log_scroll.saturating_add(10);
@@ -777,13 +797,20 @@ impl App {
                             self.reset_wizard_state();
                         }
                     }
+                    ParseResult::Ok(SlashCommand::Spawn(None)) => {
+                        // Prompt for session name inline
+                        self.inline_prompt = Some(InlinePrompt {
+                            label: "Session name (empty to auto-generate): ".to_string(),
+                            callback: PromptCallback::Spawn,
+                        });
+                        self.command_input.reset();
+                        self.error_message = None;
+                    }
                     ParseResult::Ok(cmd) => {
                         if cmd.is_interactive() {
-                            // Suspend TUI for interactive commands
                             self.pending_command = Some(cmd);
                             self.error_message = None;
                         } else {
-                            // Run inline with captured output
                             self.spawn_captured_command(cmd);
                         }
                     }
@@ -807,6 +834,34 @@ impl App {
                 if self.error_message.is_some() {
                     self.error_message = None;
                 }
+            }
+        }
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                let input = self.command_input.value().trim().to_string();
+                self.command_input.reset();
+                let prompt = self.inline_prompt.take().unwrap();
+                match prompt.callback {
+                    PromptCallback::Spawn => {
+                        let name = if input.is_empty() {
+                            None
+                        } else {
+                            Some(input)
+                        };
+                        self.spawn_captured_command(SlashCommand::Spawn(name));
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.inline_prompt = None;
+                self.command_input.reset();
+            }
+            _ => {
+                self.command_input
+                    .handle_event(&crossterm::event::Event::Key(key));
             }
         }
     }

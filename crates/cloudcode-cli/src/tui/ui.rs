@@ -775,15 +775,31 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     let input_value = app.command_input.value();
     let cursor_pos = app.command_input.visual_cursor();
 
-    let input_line = Line::from(vec![
-        Span::styled("  > ", Style::default().fg(BLUE).bold()),
-        Span::styled("/", Style::default().fg(DIM)),
-        Span::styled(input_value, Style::default().fg(Color::White)),
-        Span::styled("▌", Style::default().fg(BLUE)),
-    ]);
+    let (input_line, prompt_len) = if let Some(ref prompt) = app.inline_prompt {
+        let label = format!("  {} ", prompt.label);
+        let len = label.len();
+        (
+            Line::from(vec![
+                Span::styled(label, Style::default().fg(YELLOW)),
+                Span::styled(input_value, Style::default().fg(Color::White)),
+                Span::styled("▌", Style::default().fg(BLUE)),
+            ]),
+            len,
+        )
+    } else {
+        (
+            Line::from(vec![
+                Span::styled("  > ", Style::default().fg(BLUE).bold()),
+                Span::styled("/", Style::default().fg(DIM)),
+                Span::styled(input_value, Style::default().fg(Color::White)),
+                Span::styled("▌", Style::default().fg(BLUE)),
+            ]),
+            "  > /".len(),
+        )
+    };
     f.render_widget(Paragraph::new(input_line), layout[5]);
 
-    let cursor_x = layout[5].x + "  > /".len() as u16 + cursor_pos as u16;
+    let cursor_x = layout[5].x + prompt_len as u16 + cursor_pos as u16;
     let cursor_y = layout[5].y;
     if cursor_y < area.y + area.height {
         f.set_cursor_position((cursor_x, cursor_y));
