@@ -1,21 +1,17 @@
 use anyhow::{Context, Result};
 use std::time::Duration;
 
-use crate::config::Config;
+use crate::ssh::ssh_base_args;
 use crate::state::VpsState;
 
 #[derive(Debug)]
 pub enum CloudInitStatus {
-    Running,
     Ready,
     Failed { error: String },
 }
 
 /// Poll VPS for cloud-init completion
-pub async fn wait_for_cloud_init(
-    state: &VpsState,
-    timeout: Duration,
-) -> Result<CloudInitStatus> {
+pub async fn wait_for_cloud_init(state: &VpsState, timeout: Duration) -> Result<CloudInitStatus> {
     let start = std::time::Instant::now();
 
     loop {
@@ -27,35 +23,24 @@ pub async fn wait_for_cloud_init(
 
         // Try reading our status marker first
         let ip = state.server_ip.as_ref().context("No server IP")?;
-        let key_path = Config::ssh_key_path()?;
-        let result = std::process::Command::new("ssh")
-            .args([
-                "-i",
-                &key_path.to_string_lossy(),
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                "UserKnownHostsFile=/dev/null",
-                "-o",
-                "LogLevel=ERROR",
-                "-o",
-                "ConnectTimeout=5",
-                &format!("claude@{}", ip),
-                "cat /home/claude/.cloudcode-status.json 2>/dev/null || cloud-init status 2>/dev/null || echo unknown",
-            ])
-            .output();
+        let mut args = ssh_base_args(ip)?;
+        args.extend([
+            "-o".to_string(),
+            "ConnectTimeout=5".to_string(),
+            format!("claude@{}", ip),
+            "cat /home/claude/.cloudcode-status.json 2>/dev/null || cloud-init status 2>/dev/null || echo unknown".to_string(),
+        ]);
+        let result = std::process::Command::new("ssh").args(&args).output();
 
         if let Ok(output) = result {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let text = stdout.trim();
 
-                if text.contains("\"status\":\"ready\"") || text.contains("\"status\": \"ready\"")
-                {
+                if text.contains("\"status\":\"ready\"") || text.contains("\"status\": \"ready\"") {
                     return Ok(CloudInitStatus::Ready);
                 }
-                if text.contains("\"status\":\"error\"") || text.contains("\"status\": \"error\"")
-                {
+                if text.contains("\"status\":\"error\"") || text.contains("\"status\": \"error\"") {
                     let error = text.to_string();
                     return Ok(CloudInitStatus::Failed { error });
                 }
@@ -77,23 +62,16 @@ pub async fn wait_for_cloud_init(
 /// Verify expected software is installed
 pub async fn verify_installation(state: &VpsState) -> Result<Vec<(String, bool)>> {
     let ip = state.server_ip.as_ref().context("No server IP")?;
-    let key_path = Config::ssh_key_path()?;
+    let mut args = ssh_base_args(ip)?;
+    args.extend([
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+        format!("claude@{}", ip),
+        "export PATH=\"$HOME/.local/bin:$PATH\"; echo tmux:$(which tmux >/dev/null 2>&1 && echo ok || echo missing); echo claude:$(which claude >/dev/null 2>&1 && echo ok || echo missing)".to_string(),
+    ]);
 
     let output = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &key_path.to_string_lossy(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("claude@{}", ip),
-            "export PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\"; echo tmux:$(which tmux >/dev/null 2>&1 && echo ok || echo missing); echo claude:$(which claude >/dev/null 2>&1 && echo ok || echo missing); echo cargo:$(which cargo >/dev/null 2>&1 && echo ok || echo missing)",
-        ])
+        .args(&args)
         .output()
         .context("Failed to run verification")?;
 

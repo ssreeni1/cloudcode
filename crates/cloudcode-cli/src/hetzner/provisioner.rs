@@ -1,5 +1,4 @@
-use anyhow::{bail, Context, Result};
-use std::fs;
+use anyhow::{Context, Result, bail};
 
 use crate::config::{ClaudeConfig, Config};
 use crate::hetzner::client::HetznerClient;
@@ -21,12 +20,13 @@ packages:
   - tmux
   - curl
   - jq
-  - build-essential
-  - pkg-config
-  - libssl-dev
   - git
 
 write_files:
+  - path: /home/claude/.claude/settings.json
+    permissions: '0600'
+    content: |
+      {{"permissions":{{"allow":[],"deny":[]}},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}}
   - path: /opt/cloudcode-setup.sh
     permissions: '0755'
     content: |
@@ -64,10 +64,6 @@ write_files:
         exit 1
       fi
 
-      # Install Rust toolchain for claude user
-      echo "Installing Rust toolchain..."
-      su - claude -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-
       # Set up UFW
       ufw default deny incoming
       ufw default allow outgoing
@@ -86,101 +82,134 @@ write_files:
       rm -f /opt/cloudcode-setup.sh
 
 runcmd:
+  - chown -R claude:claude /home/claude
   - /opt/cloudcode-setup.sh
 "##
     )
 }
 
-pub async fn provision(config: &Config) -> Result<VpsState> {
-    let hetzner_config = config
-        .hetzner
-        .as_ref()
-        .context("Hetzner not configured. Run `cloudcode init` first.")?;
-    let claude_config = config
-        .claude
-        .as_ref()
-        .context("Claude not configured. Run `cloudcode init` first.")?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ClaudeConfig;
 
-    let client = HetznerClient::new(hetzner_config.api_token.clone());
+    fn dummy_claude_config() -> ClaudeConfig {
+        ClaudeConfig {
+            auth_method: "api_key".to_string(),
+            api_key: Some("sk-test".to_string()),
+            oauth_token: None,
+        }
+    }
 
-    // Read SSH public key
-    let ssh_pub_key_path = Config::ssh_pub_key_path()?;
-    if !ssh_pub_key_path.exists() {
-        bail!(
-            "SSH public key not found at {}. Run `cloudcode init` first.",
-            ssh_pub_key_path.display()
+    #[test]
+    fn cloud_init_contains_settings_json_write_file() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        assert!(output.contains("/home/claude/.claude/settings.json"));
+        assert!(output.contains("hasCompletedOnboarding"));
+        assert!(output.contains("skipDangerousModePermissionPrompt"));
+    }
+
+    #[test]
+    fn cloud_init_settings_json_before_setup_script() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        let settings_pos = output.find("settings.json").unwrap();
+        let setup_pos = output.find("cloudcode-setup.sh").unwrap();
+        assert!(
+            settings_pos < setup_pos,
+            "settings.json write_files entry should come before setup script"
         );
     }
-    let ssh_pub_key = fs::read_to_string(&ssh_pub_key_path)
-        .context("Failed to read SSH public key")?
-        .trim()
-        .to_string();
 
-    // Create SSH key in Hetzner
-    let ssh_key_id = client
-        .create_ssh_key("cloudcode", &ssh_pub_key)
-        .await
-        .context("Failed to register SSH key with Hetzner")?;
+    #[test]
+    fn cloud_init_runcmd_chown_home_before_setup_script() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        // Find the runcmd section specifically
+        let runcmd_section = output.split("runcmd:").last().unwrap();
+        let chown_pos = runcmd_section
+            .find("chown -R claude:claude /home/claude")
+            .expect("chown home dir should be in runcmd section");
+        let setup_pos = runcmd_section
+            .find("/opt/cloudcode-setup.sh")
+            .expect("setup script should be in runcmd section");
+        assert!(
+            chown_pos < setup_pos,
+            "chown home dir runcmd should come before setup script runcmd"
+        );
+    }
 
-    // Generate cloud-init
-    let cloud_init = generate_cloud_init(&ssh_pub_key, claude_config);
+    #[test]
+    fn cloud_init_contains_ssh_pub_key() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host";
+        let output = generate_cloud_init(key, &dummy_claude_config());
+        assert!(output.contains(key));
+    }
 
-    // Get server params from config or defaults
-    let vps_config = config.vps.as_ref();
-    let server_type = vps_config
-        .and_then(|v| v.server_type.as_deref())
-        .unwrap_or("cx23");
-    let location = vps_config
-        .and_then(|v| v.location.as_deref())
-        .unwrap_or("nbg1");
-    let image = vps_config
-        .and_then(|v| v.image.as_deref())
-        .unwrap_or("ubuntu-24.04");
+    #[test]
+    fn cloud_init_installs_required_packages() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        assert!(output.contains("- tmux"));
+        assert!(output.contains("- curl"));
+        assert!(output.contains("- git"));
+    }
 
-    // Create server
-    let (server_id, server_ip) = client
-        .create_server(
-            "cloudcode",
-            server_type,
-            image,
-            location,
-            vec![ssh_key_id],
-            &cloud_init,
-        )
-        .await
-        .context("Failed to create server")?;
+    #[test]
+    fn cloud_init_settings_json_is_valid_json_after_format_expansion() {
+        // In the cloud-init template, {{ becomes { after Rust format!()
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        // Extract the settings.json content line
+        let lines: Vec<&str> = output.lines().collect();
+        let settings_line = lines
+            .iter()
+            .find(|l| l.contains("hasCompletedOnboarding"))
+            .expect("settings.json content not found");
+        let trimmed = settings_line.trim();
+        // Verify it parses as valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|e| {
+            panic!("settings.json content is not valid JSON: {e}\nContent: {trimmed}")
+        });
+        assert_eq!(parsed["hasCompletedOnboarding"], true);
+        assert_eq!(parsed["skipDangerousModePermissionPrompt"], true);
+        assert!(parsed["permissions"]["allow"].is_array());
+        assert!(parsed["permissions"]["deny"].is_array());
+    }
 
-    let state = VpsState {
-        server_id: Some(server_id),
-        server_ip: Some(server_ip),
-        ssh_key_id: Some(ssh_key_id),
-        status: Some("initializing".to_string()),
-    };
+    #[test]
+    fn cloud_init_creates_claude_user_with_sudo() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        assert!(output.contains("name: claude"));
+        assert!(output.contains("groups: sudo"));
+        assert!(output.contains("NOPASSWD:ALL"));
+    }
 
-    Ok(state)
+    #[test]
+    fn cloud_init_setup_script_sets_up_ufw() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        assert!(output.contains("ufw default deny incoming"));
+        assert!(output.contains("ufw allow 22/tcp"));
+    }
 }
 
 pub async fn deprovision(state: &VpsState, config: &Config) -> Result<()> {
-    let hetzner_config = config
-        .hetzner
-        .as_ref()
-        .context("Hetzner not configured")?;
+    let hetzner_config = config.hetzner.as_ref().context("Hetzner not configured")?;
 
     let client = HetznerClient::new(hetzner_config.api_token.clone());
+    let mut errors = Vec::new();
 
     if let Some(server_id) = state.server_id {
-        client
-            .delete_server(server_id)
-            .await
-            .context("Failed to delete server")?;
+        if let Err(e) = client.delete_server(server_id).await {
+            errors.push(format!("Failed to delete server {}: {}", server_id, e));
+        }
     }
 
     if let Some(ssh_key_id) = state.ssh_key_id {
-        client
-            .delete_ssh_key(ssh_key_id)
-            .await
-            .context("Failed to delete SSH key")?;
+        if let Err(e) = client.delete_ssh_key(ssh_key_id).await {
+            errors.push(format!("Failed to delete SSH key {}: {}", ssh_key_id, e));
+        }
     }
 
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", errors.join("; "))
+    }
 }

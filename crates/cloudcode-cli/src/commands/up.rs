@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
@@ -11,7 +11,7 @@ use crate::ssh::connection::wait_for_ssh;
 use crate::ssh::health::{self, CloudInitStatus};
 use crate::state::VpsState;
 
-const TOTAL_STEPS: u8 = 11;
+const TOTAL_STEPS: u8 = 10;
 
 /// Whether to use fancy indicatif spinners (TTY) or plain println (piped).
 fn is_tty() -> bool {
@@ -45,10 +45,7 @@ fn finish_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
     }
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template(&format!(
-                "  {} [{step}/{total}] {{msg}}",
-                "✓".green()
-            ))
+            .template(&format!("  {} [{step}/{total}] {{msg}}", "✓".green()))
             .expect("invalid template"),
     );
     pb.finish_with_message(msg.to_string());
@@ -61,22 +58,19 @@ fn fail_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
     }
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template(&format!(
-                "  {} [{step}/{total}] {{msg}}",
-                "✗".red()
-            ))
+            .template(&format!("  {} [{step}/{total}] {{msg}}", "✗".red()))
             .expect("invalid template"),
     );
     pb.finish_with_message(msg.to_string());
 }
 
-pub async fn run(no_wait: bool) -> Result<()> {
+pub async fn run(no_wait: bool, server_type_override: Option<String>) -> Result<()> {
     let config = Config::load()?;
     let existing_state = VpsState::load()?;
 
     if existing_state.is_provisioned() {
         bail!(
-            "VPS already provisioned (server ID: {}, IP: {}). Run `cloudcode down` first.",
+            "VPS already provisioned (server ID: {}, IP: {}). Run /down or `cloudcode down` first.",
             existing_state.server_id.unwrap(),
             existing_state.server_ip.as_deref().unwrap_or("unknown")
         );
@@ -85,15 +79,16 @@ pub async fn run(no_wait: bool) -> Result<()> {
     let hetzner_config = config
         .hetzner
         .as_ref()
-        .context("Hetzner not configured. Run `cloudcode init` first.")?;
+        .context("Hetzner not configured. Run /init or `cloudcode init` first.")?;
     let claude_config = config
         .claude
         .as_ref()
-        .context("Claude not configured. Run `cloudcode init` first.")?;
+        .context("Claude not configured. Run /init or `cloudcode init` first.")?;
 
     let vps_config = config.vps.as_ref();
-    let server_type = vps_config
-        .and_then(|v| v.server_type.as_deref())
+    let server_type = server_type_override
+        .as_deref()
+        .or_else(|| vps_config.and_then(|v| v.server_type.as_deref()))
         .unwrap_or("cx23");
     let location = vps_config
         .and_then(|v| v.location.as_deref())
@@ -120,6 +115,23 @@ pub async fn run(no_wait: bool) -> Result<()> {
                 println!("Aborted.");
                 return Ok(());
             }
+
+            println!(
+                "Security model: the remote 'claude' user gets passwordless sudo, and Claude runs in bypass-permissions mode to support unattended remote control. Continue? [y/N]"
+            );
+            input.clear();
+            std::io::stdin().read_line(&mut input)?;
+            let trimmed = input.trim();
+            if trimmed != "y" && trimmed != "Y" && !trimmed.eq_ignore_ascii_case("yes") {
+                println!("Aborted.");
+                return Ok(());
+            }
+        } else {
+            println!(
+                "{}",
+                "Warning: cloudcode provisions a VPS where the 'claude' user has passwordless sudo and Claude runs in bypass-permissions mode."
+                    .yellow()
+            );
         }
     }
 
@@ -131,7 +143,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
     if !ssh_pub_key_path.exists() {
         fail_step(&pb, 1, TOTAL_STEPS, "SSH public key not found");
         bail!(
-            "SSH public key not found at {}. Run `cloudcode init` first.",
+            "SSH public key not found at {}. Run /init or `cloudcode init` first.",
             ssh_pub_key_path.display()
         );
     }
@@ -213,12 +225,11 @@ pub async fn run(no_wait: bool) -> Result<()> {
     if no_wait {
         println!(
             "\n{}",
-            "VPS provisioned. Skipping cloud-init wait (--no-wait)."
-                .yellow()
+            "VPS provisioned. Skipping cloud-init wait (--no-wait).".yellow()
         );
         println!(
             "{}",
-            "Cloud-init is still running. Use `cloudcode status` to check progress."
+            "Cloud-init is still running. Use /status or `cloudcode status` to check progress."
                 .yellow()
         );
         return Ok(());
@@ -232,46 +243,36 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
         Err(e) => {
             fail_step(&pb, 4, TOTAL_STEPS, "SSH connectivity timed out");
-            println!(
-                "\n{}: {}",
-                "Warning".yellow().bold(),
-                e
-            );
+            println!("\n{}: {}", "Warning".yellow().bold(), e);
             println!(
                 "{}",
-                "The server may still be starting. Try `cloudcode status` later.".yellow()
+                "The server may still be starting. Try /status or `cloudcode status` later."
+                    .yellow()
             );
             return Ok(());
         }
     }
 
     // Step 5: Wait for cloud-init completion
-    let pb = step_bar(5, TOTAL_STEPS, "Waiting for cloud-init to complete (this can take 10-20 min)...");
+    let pb = step_bar(
+        5,
+        TOTAL_STEPS,
+        "Waiting for cloud-init to complete...",
+    );
     match health::wait_for_cloud_init(&state, Duration::from_secs(600)).await? {
         CloudInitStatus::Ready => {
             finish_step(&pb, 5, TOTAL_STEPS, "Cloud-init completed successfully");
         }
         CloudInitStatus::Failed { error } => {
             fail_step(&pb, 5, TOTAL_STEPS, "Cloud-init failed");
-            println!(
-                "\n{}: {}",
-                "Error".red().bold(),
-                error
-            );
+            println!("\n{}: {}", "Error".red().bold(), error);
             println!(
                 "{}",
-                "Check logs with: cloudcode ssh -- cat /var/log/cloudcode-setup.log".yellow()
+                "Check logs with: /ssh -- cat /var/log/cloudcode-setup.log (or cloudcode ssh ...)"
+                    .yellow()
             );
             state.status = Some("error".to_string());
             state.save()?;
-            return Ok(());
-        }
-        CloudInitStatus::Running => {
-            fail_step(&pb, 5, TOTAL_STEPS, "Cloud-init still running (timed out)");
-            println!(
-                "\n{}",
-                "Cloud-init is still running. Use `cloudcode status` to check progress.".yellow()
-            );
             return Ok(());
         }
     }
@@ -304,57 +305,52 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
         Err(e) => {
             fail_step(&pb, 6, TOTAL_STEPS, "Failed to verify installation");
-            println!(
-                "\n{}: {}",
-                "Warning".yellow().bold(),
-                e
-            );
+            println!("\n{}: {}", "Warning".yellow().bold(), e);
         }
     }
 
-    // Step 7: Upload source to VPS
-    let pb = step_bar(7, TOTAL_STEPS, "Uploading source to VPS...");
-    match crate::deploy::upload_source(&state) {
-        Ok(()) => {
-            finish_step(&pb, 7, TOTAL_STEPS, "Source uploaded to VPS");
-        }
-        Err(e) => {
-            fail_step(&pb, 7, TOTAL_STEPS, "Failed to upload source");
-            println!(
-                "\n{}: {}",
-                "Error".red().bold(),
-                e
-            );
-            state.status = Some("error".to_string());
-            state.save()?;
-            return Ok(());
-        }
-    }
-
-    // Step 8: Build daemon on VPS
+    // Step 7: Prepare daemon binary (embedded or cross-compile fallback)
+    let target = crate::deploy::target_triple_for_server_type(server_type);
     let pb = step_bar(
-        8,
+        7,
         TOTAL_STEPS,
-        "Building daemon on VPS (this may take 3-5 minutes)...",
+        &format!("Preparing daemon for {target}..."),
     );
-    match crate::deploy::build_daemon(&state) {
-        Ok(()) => {
-            finish_step(&pb, 8, TOTAL_STEPS, "Daemon built successfully");
+    let binary_path = match crate::deploy::get_daemon_binary(target) {
+        Ok(path) => {
+            finish_step(
+                &pb,
+                7,
+                TOTAL_STEPS,
+                &format!("Daemon ready for {target}"),
+            );
+            path
         }
         Err(e) => {
-            fail_step(&pb, 8, TOTAL_STEPS, "Daemon build failed");
-            println!(
-                "\n{}: {}",
-                "Error".red().bold(),
-                e
-            );
+            fail_step(&pb, 7, TOTAL_STEPS, "Cross-compilation failed");
+            println!("\n{}: {}", "Error".red().bold(), e);
+            state.status = Some("error".to_string());
+            state.save()?;
+            return Ok(());
+        }
+    };
+
+    // Step 8: Upload daemon binary
+    let pb = step_bar(8, TOTAL_STEPS, "Uploading daemon binary to VPS...");
+    match crate::deploy::upload_binary(&state, &binary_path) {
+        Ok(()) => {
+            finish_step(&pb, 8, TOTAL_STEPS, "Daemon binary uploaded");
+        }
+        Err(e) => {
+            fail_step(&pb, 8, TOTAL_STEPS, "Failed to upload binary");
+            println!("\n{}: {}", "Error".red().bold(), e);
             state.status = Some("error".to_string());
             state.save()?;
             return Ok(());
         }
     }
 
-    // Step 9: Install daemon + config + systemd
+    // Step 9: Install daemon config + systemd
     let pb = step_bar(9, TOTAL_STEPS, "Installing daemon service...");
     match crate::deploy::install_daemon(&state, &config) {
         Ok(()) => {
@@ -362,64 +358,88 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
         Err(e) => {
             fail_step(&pb, 9, TOTAL_STEPS, "Failed to install daemon service");
-            println!(
-                "\n{}: {}",
-                "Error".red().bold(),
-                e
-            );
+            println!("\n{}: {}", "Error".red().bold(), e);
             state.status = Some("error".to_string());
             state.save()?;
             return Ok(());
         }
     }
 
-    // Step 10: Verify daemon is running
+    // Step 10: Verify daemon + finalize
     let pb = step_bar(10, TOTAL_STEPS, "Verifying daemon is running...");
     match crate::deploy::verify_daemon(&state) {
         Ok(()) => {
+            state.status = Some("running".to_string());
+            state.save()?;
             finish_step(&pb, 10, TOTAL_STEPS, "Daemon is running");
         }
         Err(e) => {
             fail_step(&pb, 10, TOTAL_STEPS, "Daemon is not running");
-            println!(
-                "\n{}: {}",
-                "Warning".yellow().bold(),
-                e
-            );
+            println!("\n{}: {}", "Warning".yellow().bold(), e);
+            state.status = Some("running".to_string());
+            state.save()?;
         }
     }
 
-    // Step 11: Update state to running
-    let pb = step_bar(11, TOTAL_STEPS, "Finalizing...");
-    state.status = Some("running".to_string());
-    state.save()?;
-    finish_step(&pb, 11, TOTAL_STEPS, "State saved");
-
     println!(
-        "\n{}",
-        "VPS provisioned and daemon deployed successfully!".bold().green(),
+        "\n  {} {}",
+        "✓".green().bold(),
+        "VPS provisioned and daemon deployed successfully!"
+            .bold()
+            .green(),
     );
-    println!("\nNext steps:");
-    println!("  {}              # Create a Claude Code session", "cloudcode spawn".bold());
-    println!("  {}  # Connect interactively", "cloudcode open <name>".bold());
+
+    println!("\n  {}", "Next steps:".bold());
+    println!(
+        "    {}              # Create a Claude Code session",
+        "/spawn".cyan().bold()
+    );
+    println!(
+        "    {}  # Connect interactively",
+        "/open <name>".cyan().bold()
+    );
+    println!(
+        "    {}",
+        "(or use cloudcode spawn / cloudcode open <name> from CLI)".dimmed()
+    );
 
     if let Some(ref claude) = config.claude {
         if claude.auth_method == "oauth" {
-            println!("\n{}  OAuth login required", "!".yellow().bold());
-            println!("  Run {} after spawning to log in.", "cloudcode open <name>".bold());
-            println!("  Claude will show a login URL — {} to copy it.", "highlight and copy the URL manually".bold());
-            println!("  (Pressing 'c' copies to the VPS clipboard, not your local machine.)");
-            println!("  Open the URL in your local browser to complete the auth flow.");
+            println!(
+                "\n  {}  {}",
+                "!".yellow().bold(),
+                "OAuth login required".yellow().bold()
+            );
+            println!(
+                "    Run {} after spawning to log in.",
+                "/open <name>".cyan().bold()
+            );
+            println!(
+                "    Claude will show a login URL — {} to copy it.",
+                "highlight and copy the URL manually".bold()
+            );
+            println!(
+                "    {}",
+                "(Pressing 'c' copies to the VPS clipboard, not your local machine.)".dimmed()
+            );
+            println!("    Open the URL in your local browser to complete the auth flow.");
             if config.telegram.is_some() {
-                println!("\n{}  Telegram will not work until OAuth login is complete.", "!".yellow().bold());
+                println!(
+                    "\n  {}  {}",
+                    "!".yellow().bold(),
+                    "Telegram will not work until OAuth login is complete.".yellow()
+                );
             }
         }
     }
 
     if config.telegram.is_some() {
-        println!("\nTelegram:");
-        println!("  Your bot is active! Message it to start chatting.");
-        println!("  Send /spawn to create a session, then type any message.");
+        println!("\n  {}", "Telegram:".bold());
+        println!("    Your bot is active! Message it to start chatting.");
+        println!(
+            "    Send {} to create a session, then type any message.",
+            "/spawn".cyan().bold()
+        );
     }
 
     Ok(())

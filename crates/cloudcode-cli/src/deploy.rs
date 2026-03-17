@@ -1,105 +1,164 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::ssh::{shell_command, ssh_base_args};
 use crate::state::VpsState;
 
-/// Upload project source to VPS via rsync
-pub fn upload_source(state: &VpsState) -> Result<()> {
-    let ip = state.server_ip.as_ref().context("No server IP")?;
-    let key_path = Config::ssh_key_path()?;
+// Embedded daemon binaries (populated by build.rs when pre-built binaries are available)
+mod embedded {
+    include!(concat!(env!("OUT_DIR"), "/embedded_daemons.rs"));
+}
 
-    // Find workspace root from compile-time CARGO_MANIFEST_DIR
+fn ssh_command_args(ip: &str, command: &str) -> Result<Vec<String>> {
+    let mut args = ssh_base_args(ip)?;
+    args.extend([format!("claude@{}", ip), command.to_string()]);
+    Ok(args)
+}
+
+/// Map a Hetzner server type name to a Rust target triple.
+/// CAX = ARM64, CX/CPX = x86_64.
+pub fn target_triple_for_server_type(server_type: &str) -> &'static str {
+    if server_type.starts_with("cax") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    }
+}
+
+/// Get the daemon binary for a target: try embedded first, fall back to cross-compilation.
+pub fn get_daemon_binary(target: &str) -> Result<PathBuf> {
+    // Try embedded binary first
+    if let Some(path) = extract_embedded_daemon(target)? {
+        return Ok(path);
+    }
+    // Fall back to cross-compilation
+    cross_compile_daemon(target)
+}
+
+/// Extract an embedded daemon binary to a temp file, if one was baked in at compile time.
+fn extract_embedded_daemon(target: &str) -> Result<Option<PathBuf>> {
+    let bytes = match target {
+        "x86_64-unknown-linux-gnu" => embedded::DAEMON_X86_64,
+        "aarch64-unknown-linux-gnu" => embedded::DAEMON_AARCH64,
+        _ => None,
+    };
+
+    let bytes = match bytes {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+
+    let tmp_path = std::env::temp_dir().join(format!("cloudcode-daemon-{}", target));
+    std::fs::write(&tmp_path, bytes).context("Failed to write embedded daemon binary")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    Ok(Some(tmp_path))
+}
+
+/// Cross-compile the daemon binary locally using cargo-zigbuild.
+/// Returns the path to the compiled binary.
+pub fn cross_compile_daemon(target: &str) -> Result<PathBuf> {
+    // Check that cargo-zigbuild is available
+    let zigbuild_check = std::process::Command::new("cargo")
+        .args(["zigbuild", "--version"])
+        .output();
+    match zigbuild_check {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            anyhow::bail!(
+                "cargo-zigbuild is not installed. Install it with:\n  \
+                 brew install zig && cargo install cargo-zigbuild\n  \
+                 rustup target add {target}"
+            );
+        }
+    }
+
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
         .context("Could not determine workspace root")?;
 
-    let ssh_opts = format!(
-        "ssh -i {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
-        key_path.display()
-    );
-
-    // First create the target directory
-    let mkdir_status = std::process::Command::new("ssh")
+    let output = std::process::Command::new("cargo")
         .args([
-            "-i",
-            &key_path.to_string_lossy(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("claude@{}", ip),
-            "mkdir -p /home/claude/cloudcode-src",
+            "zigbuild",
+            "--release",
+            "-p",
+            "cloudcode-daemon",
+            "--target",
+            target,
         ])
-        .status()
-        .context("Failed to create remote directory")?;
-
-    if !mkdir_status.success() {
-        anyhow::bail!("Failed to create remote directory");
-    }
-
-    let status = std::process::Command::new("rsync")
-        .args([
-            "-az",
-            "--exclude",
-            "target/",
-            "--exclude",
-            ".git/",
-            "-e",
-            &ssh_opts,
-            &format!("{}/", workspace_root.display()),
-            &format!("claude@{}:/home/claude/cloudcode-src/", ip),
-        ])
-        .status()
-        .context("Failed to rsync source. Is rsync installed?")?;
-
-    if !status.success() {
-        anyhow::bail!("rsync failed");
-    }
-    Ok(())
-}
-
-/// Build daemon on the VPS
-pub fn build_daemon(state: &VpsState) -> Result<()> {
-    let ip = state.server_ip.as_ref().context("No server IP")?;
-    let key_path = Config::ssh_key_path()?;
-
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &key_path.to_string_lossy(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("claude@{}", ip),
-            "source $HOME/.cargo/env && cd /home/claude/cloudcode-src && cargo build --release -p cloudcode-daemon 2>&1",
-        ])
+        .current_dir(workspace_root)
         .output()
-        .context("Failed to build daemon")?;
+        .context("Failed to run cargo zigbuild")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("Daemon build failed:\n{}\n{}", stdout, stderr);
+        anyhow::bail!("Cross-compilation failed:\n{}\n{}", stdout, stderr);
+    }
+
+    let binary = workspace_root
+        .join("target")
+        .join(target)
+        .join("release")
+        .join("cloudcode-daemon");
+    if !binary.exists() {
+        anyhow::bail!("Binary not found at {}", binary.display());
+    }
+    Ok(binary)
+}
+
+/// Upload the pre-compiled daemon binary to the VPS via scp.
+pub fn upload_binary(state: &VpsState, local_binary: &Path) -> Result<()> {
+    let ip = state.server_ip.as_ref().context("No server IP")?;
+    let ssh_opts = shell_command(&ssh_base_args(ip)?);
+
+    // scp binary to /tmp on the VPS
+    let status = std::process::Command::new("scp")
+        .args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-e",
+            &ssh_opts,
+            &local_binary.to_string_lossy(),
+            &format!("claude@{}:/tmp/cloudcode-daemon", ip),
+        ])
+        .status()
+        .context("Failed to scp binary")?;
+
+    if !status.success() {
+        anyhow::bail!("scp failed");
+    }
+
+    // Move into place
+    let output = std::process::Command::new("ssh")
+        .args(ssh_command_args(
+            ip,
+            "sudo mv /tmp/cloudcode-daemon /usr/local/bin/cloudcode-daemon && sudo chmod 755 /usr/local/bin/cloudcode-daemon",
+        )?)
+        .output()
+        .context("Failed to install binary on VPS")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to install binary: {}", stderr);
     }
     Ok(())
 }
 
-/// Install daemon binary, config, and systemd unit
+/// Install daemon config, env file, and systemd unit (binary already in place).
 pub fn install_daemon(state: &VpsState, config: &crate::config::Config) -> Result<()> {
     let ip = state.server_ip.as_ref().context("No server IP")?;
-    let key_path = Config::ssh_key_path()?;
 
     // Generate daemon config TOML
     let mut daemon_toml = String::from("listen_addr = \"127.0.0.1\"\nlisten_port = 7700\n");
@@ -143,11 +202,8 @@ ReadWritePaths=/home/claude /tmp
 WantedBy=multi-user.target
 "#;
 
-    // Run install commands via SSH
     let install_script = format!(
         r#"set -e
-sudo cp /home/claude/cloudcode-src/target/release/cloudcode-daemon /usr/local/bin/cloudcode-daemon
-sudo chmod 755 /usr/local/bin/cloudcode-daemon
 sudo mkdir -p /etc/cloudcode
 cat << 'DAEMON_TOML' | sudo tee /etc/cloudcode/daemon.toml > /dev/null
 {daemon_toml}
@@ -159,6 +215,11 @@ cat << 'ENV_FILE' > /home/claude/.cloudcode-env
 ENV_FILE
 chown claude:claude /home/claude/.cloudcode-env
 chmod 0600 /home/claude/.cloudcode-env
+mkdir -p /home/claude/.claude
+cat << 'SETTINGS_JSON' > /home/claude/.claude/settings.json
+{{"permissions":{{"allow":[],"deny":[]}},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}}
+SETTINGS_JSON
+chown -R claude:claude /home/claude/.claude
 cat << 'UNIT_FILE' | sudo tee /etc/systemd/system/cloudcode-daemon.service > /dev/null
 {unit}
 UNIT_FILE
@@ -169,20 +230,7 @@ sudo systemctl restart cloudcode-daemon
     );
 
     let output = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &key_path.to_string_lossy(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("claude@{}", ip),
-            &install_script,
-        ])
+        .args(ssh_command_args(ip, &install_script)?)
         .output()
         .context("Failed to install daemon")?;
 
@@ -196,35 +244,71 @@ sudo systemctl restart cloudcode-daemon
 /// Verify daemon is running
 pub fn verify_daemon(state: &VpsState) -> Result<()> {
     let ip = state.server_ip.as_ref().context("No server IP")?;
-    let key_path = Config::ssh_key_path()?;
 
-    // Wait a moment for systemd to start the service
     std::thread::sleep(std::time::Duration::from_secs(2));
 
     let output = std::process::Command::new("ssh")
-        .args([
-            "-i",
-            &key_path.to_string_lossy(),
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-o",
-            "ConnectTimeout=10",
-            &format!("claude@{}", ip),
+        .args(ssh_command_args(
+            ip,
             "systemctl is-active cloudcode-daemon",
-        ])
+        )?)
         .output()
         .context("Failed to check daemon status")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim() != "active" {
         anyhow::bail!(
-            "Daemon is not running. Status: {}. Check with `cloudcode ssh` then `systemctl status cloudcode-daemon`",
+            "Daemon is not running. Status: {}. Check with /ssh or `cloudcode ssh` then `systemctl status cloudcode-daemon`",
             stdout.trim()
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_triple_cx_is_x86() {
+        assert_eq!(
+            target_triple_for_server_type("cx23"),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            target_triple_for_server_type("cx53"),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            target_triple_for_server_type("cpx31"),
+            "x86_64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn target_triple_cax_is_arm() {
+        assert_eq!(
+            target_triple_for_server_type("cax11"),
+            "aarch64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            target_triple_for_server_type("cax41"),
+            "aarch64-unknown-linux-gnu"
+        );
+    }
+
+    #[test]
+    fn install_script_contains_settings_json() {
+        let template_fragment = r#"mkdir -p /home/claude/.claude
+cat << 'SETTINGS_JSON' > /home/claude/.claude/settings.json"#;
+        assert!(template_fragment.contains(".claude/settings.json"));
+    }
+
+    #[test]
+    fn install_script_settings_json_has_correct_keys() {
+        let expanded = r#"{"permissions":{"allow":[],"deny":[]},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}"#;
+        let parsed: serde_json::Value = serde_json::from_str(expanded).unwrap();
+        assert_eq!(parsed["hasCompletedOnboarding"], true);
+        assert_eq!(parsed["skipDangerousModePermissionPrompt"], true);
+    }
 }

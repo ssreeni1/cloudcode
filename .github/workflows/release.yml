@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-daemon:
+    name: Build daemon (${{ matrix.target }})
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild
+
+      - name: Build daemon
+        run: cargo zigbuild --release -p cloudcode-daemon --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cloudcode-daemon
+
+  build-cli:
+    name: Build CLI (${{ matrix.target }})
+    needs: build-daemon
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Download pre-built daemon binaries
+      - uses: actions/download-artifact@v4
+        with:
+          name: daemon-x86_64-unknown-linux-gnu
+          path: target/daemon-binaries/x86_64-unknown-linux-gnu/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: daemon-aarch64-unknown-linux-gnu
+          path: target/daemon-binaries/aarch64-unknown-linux-gnu/
+
+      # Native build on matching host
+      - name: Build CLI (native)
+        if: (matrix.target == 'aarch64-apple-darwin' && runner.arch == 'ARM64') || (matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64')
+        run: cargo build --release -p cloudcode-cli --target ${{ matrix.target }}
+
+      # Cross-build with zigbuild when host != target
+      - name: Setup zig
+        if: "!((matrix.target == 'aarch64-apple-darwin' && runner.arch == 'ARM64') || (matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64'))"
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild
+        if: "!((matrix.target == 'aarch64-apple-darwin' && runner.arch == 'ARM64') || (matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64'))"
+        run: cargo install cargo-zigbuild
+
+      - name: Build CLI (cross)
+        if: "!((matrix.target == 'aarch64-apple-darwin' && runner.arch == 'ARM64') || (matrix.target == 'x86_64-unknown-linux-gnu' && runner.os == 'Linux' && runner.arch == 'X64'))"
+        run: cargo zigbuild --release -p cloudcode-cli --target ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/cloudcode
+
+  release:
+    name: Create Release
+    needs: build-cli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release/
+          for dir in artifacts/cli-*/; do
+            target=$(basename "$dir" | sed 's/cli-//')
+            cp "$dir/cloudcode" "release/cloudcode-${target}"
+            chmod +x "release/cloudcode-${target}"
+          done
+          ls -la release/
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
