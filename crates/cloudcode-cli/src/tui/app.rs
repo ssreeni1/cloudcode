@@ -225,6 +225,8 @@ pub struct App {
 
     pub should_quit: bool,
     pub spinner_tick: usize,
+    /// Timestamp of last Ctrl+C press (for double-press to quit).
+    pub last_ctrl_c: Option<std::time::Instant>,
 }
 
 impl App {
@@ -285,6 +287,7 @@ impl App {
 
             should_quit: false,
             spinner_tick: 0,
+            last_ctrl_c: None,
         })
     }
 
@@ -323,12 +326,29 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.is_command_running() {
-                // Kill the running subprocess
+                // First Ctrl+C kills the subprocess
                 self.kill_running_command();
+                self.last_ctrl_c = None;
             } else {
-                self.should_quit = true;
+                // Double Ctrl+C within 2 seconds to quit
+                let now = std::time::Instant::now();
+                if let Some(prev) = self.last_ctrl_c {
+                    if now.duration_since(prev) < std::time::Duration::from_secs(2) {
+                        self.should_quit = true;
+                        return;
+                    }
+                }
+                self.last_ctrl_c = Some(now);
+                self.error_message =
+                    Some("Press Ctrl+C again to exit cloudcode.".to_string());
             }
             return;
+        }
+
+        // Clear the Ctrl+C hint on any other keypress
+        if self.last_ctrl_c.is_some() {
+            self.last_ctrl_c = None;
+            self.error_message = None;
         }
 
         match self.mode {
