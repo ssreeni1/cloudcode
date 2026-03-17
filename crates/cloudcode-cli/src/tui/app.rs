@@ -1,6 +1,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
@@ -218,6 +220,8 @@ pub struct App {
     pub command_done: bool,
     pub show_help: bool,
     pub log_scroll: usize,
+    /// PID of the running subprocess (0 = none). Used by Ctrl+C to kill it.
+    pub child_pid: Arc<AtomicU32>,
 
     pub should_quit: bool,
     pub spinner_tick: usize,
@@ -275,8 +279,9 @@ impl App {
             log_lines: Vec::new(),
             running_command: None,
             command_done: false,
-            show_help: true, // Start showing help
+            show_help: true,
             log_scroll: 0,
+            child_pid: Arc::new(AtomicU32::new(0)),
 
             should_quit: false,
             spinner_tick: 0,
@@ -296,13 +301,30 @@ impl App {
         self.running_command.is_some() && !self.command_done
     }
 
+    fn kill_running_command(&mut self) {
+        let pid = self.child_pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            // Send SIGTERM to the subprocess
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
+            self.child_pid.store(0, Ordering::SeqCst);
+        }
+        self.command_done = true;
+        self.log_lines.push(LogLine {
+            text: "Cancelled.".to_string(),
+            is_error: true,
+        });
+    }
+
     // ── Key dispatch ────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.is_command_running() {
-                // Don't quit while a command is running
-                self.error_message = Some("Command running...".to_string());
+                // Kill the running subprocess
+                self.kill_running_command();
             } else {
                 self.should_quit = true;
             }
@@ -595,6 +617,7 @@ impl App {
         let display = cmd.display_name();
         let args = cmd.to_cli_args();
         let tx = self.log_tx.clone();
+        let pid_ref = self.child_pid.clone();
 
         self.log_lines.clear();
         self.running_command = Some(display);
@@ -602,6 +625,7 @@ impl App {
         self.show_help = false;
         self.log_scroll = 0;
         self.error_message = None;
+        self.child_pid.store(0, Ordering::SeqCst);
 
         tokio::spawn(async move {
             let exe = match std::env::current_exe() {
@@ -628,6 +652,9 @@ impl App {
                     return;
                 }
             };
+
+            // Store PID so Ctrl+C can kill it
+            pid_ref.store(child.id(), Ordering::SeqCst);
 
             let stdout = child.stdout.take().unwrap();
             let stderr = child.stderr.take().unwrap();
@@ -664,6 +691,7 @@ impl App {
             let _ = stderr_handle.await;
 
             let status = child.wait().ok().and_then(|s| s.code());
+            pid_ref.store(0, Ordering::SeqCst);
             let _ = tx.send(LogEvent::Done(status));
         });
     }

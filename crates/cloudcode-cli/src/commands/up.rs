@@ -11,21 +11,38 @@ use crate::ssh::connection::wait_for_ssh;
 use crate::ssh::health::{self, CloudInitStatus};
 use crate::state::VpsState;
 
-const TOTAL_STEPS: u8 = 13;
+const TOTAL_STEPS: u8 = 11;
+
+/// Whether to use fancy indicatif spinners (TTY) or plain println (piped).
+fn is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
 
 fn step_bar(step: u8, total: u8, msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .template(&format!("  {{spinner:.green}} [{step}/{total}] {{msg}}"))
-            .expect("invalid template"),
-    );
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
-    pb
+    if !is_tty() {
+        // When piped (e.g. from TUI subprocess), use a hidden progress bar
+        // and print a plain line immediately so the TUI can capture it.
+        println!("  ... [{step}/{total}] {msg}");
+        ProgressBar::hidden()
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template(&format!("  {{spinner:.green}} [{step}/{total}] {{msg}}"))
+                .expect("invalid template"),
+        );
+        pb.set_message(msg.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        pb
+    }
 }
 
 fn finish_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
+    if !is_tty() {
+        println!("  ✓ [{step}/{total}] {msg}");
+        return;
+    }
     pb.set_style(
         ProgressStyle::default_spinner()
             .template(&format!(
@@ -38,6 +55,10 @@ fn finish_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
 }
 
 fn fail_step(pb: &ProgressBar, step: u8, total: u8, msg: &str) {
+    if !is_tty() {
+        println!("  ✗ [{step}/{total}] {msg}");
+        return;
+    }
     pb.set_style(
         ProgressStyle::default_spinner()
             .template(&format!(
@@ -136,6 +157,15 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     };
 
+    // Save partial state immediately to prevent orphaned SSH keys
+    let mut state = VpsState {
+        server_id: None,
+        server_ip: None,
+        ssh_key_id: Some(ssh_key_id),
+        status: Some("creating".to_string()),
+    };
+    state.save()?;
+
     // Step 3: Provision server
     let pb = step_bar(
         3,
@@ -173,23 +203,13 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     };
 
-    // Step 4: Save state early (so `down` works even if later steps fail)
-    let pb = step_bar(4, TOTAL_STEPS, "Saving state...");
-    let mut state = VpsState {
-        server_id: Some(server_id),
-        server_ip: Some(server_ip.clone()),
-        ssh_key_id: Some(ssh_key_id),
-        status: Some("initializing".to_string()),
-    };
+    // Save full state so `down` works even if later steps fail
+    state.server_id = Some(server_id);
+    state.server_ip = Some(server_ip.clone());
+    state.status = Some("initializing".to_string());
     state.save()?;
-    finish_step(
-        &pb,
-        4,
-        TOTAL_STEPS,
-        &format!("Saved state (IP: {})", server_ip.bold()),
-    );
 
-    // Step 5: Check no_wait flag
+    // Check no_wait flag
     if no_wait {
         println!(
             "\n{}",
@@ -204,14 +224,14 @@ pub async fn run(no_wait: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Step 6: Wait for SSH connectivity
-    let pb = step_bar(6, TOTAL_STEPS, "Waiting for SSH connectivity...");
+    // Step 4: Wait for SSH connectivity
+    let pb = step_bar(4, TOTAL_STEPS, "Waiting for SSH connectivity...");
     match wait_for_ssh(&state, Duration::from_secs(120)).await {
         Ok(()) => {
-            finish_step(&pb, 6, TOTAL_STEPS, "SSH is reachable");
+            finish_step(&pb, 4, TOTAL_STEPS, "SSH is reachable");
         }
         Err(e) => {
-            fail_step(&pb, 6, TOTAL_STEPS, "SSH connectivity timed out");
+            fail_step(&pb, 4, TOTAL_STEPS, "SSH connectivity timed out");
             println!(
                 "\n{}: {}",
                 "Warning".yellow().bold(),
@@ -225,14 +245,14 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 7: Wait for cloud-init completion
-    let pb = step_bar(7, TOTAL_STEPS, "Waiting for cloud-init to complete...");
+    // Step 5: Wait for cloud-init completion
+    let pb = step_bar(5, TOTAL_STEPS, "Waiting for cloud-init to complete...");
     match health::wait_for_cloud_init(&state, Duration::from_secs(600)).await? {
         CloudInitStatus::Ready => {
-            finish_step(&pb, 7, TOTAL_STEPS, "Cloud-init completed successfully");
+            finish_step(&pb, 5, TOTAL_STEPS, "Cloud-init completed successfully");
         }
         CloudInitStatus::Failed { error } => {
-            fail_step(&pb, 7, TOTAL_STEPS, "Cloud-init failed");
+            fail_step(&pb, 5, TOTAL_STEPS, "Cloud-init failed");
             println!(
                 "\n{}: {}",
                 "Error".red().bold(),
@@ -247,7 +267,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
             return Ok(());
         }
         CloudInitStatus::Running => {
-            fail_step(&pb, 7, TOTAL_STEPS, "Cloud-init still running (timed out)");
+            fail_step(&pb, 5, TOTAL_STEPS, "Cloud-init still running (timed out)");
             println!(
                 "\n{}",
                 "Cloud-init is still running. Use `cloudcode status` to check progress.".yellow()
@@ -256,13 +276,13 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 8: Verify installation
-    let pb = step_bar(8, TOTAL_STEPS, "Verifying installed software...");
+    // Step 6: Verify installation
+    let pb = step_bar(6, TOTAL_STEPS, "Verifying installed software...");
     match health::verify_installation(&state).await {
         Ok(results) => {
             let all_ok = results.iter().all(|(_, ok)| *ok);
             if all_ok {
-                finish_step(&pb, 8, TOTAL_STEPS, "All software verified");
+                finish_step(&pb, 6, TOTAL_STEPS, "All software verified");
             } else {
                 let missing: Vec<_> = results
                     .iter()
@@ -271,7 +291,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
                     .collect();
                 fail_step(
                     &pb,
-                    8,
+                    6,
                     TOTAL_STEPS,
                     &format!("Missing software: {}", missing.join(", ")),
                 );
@@ -283,7 +303,7 @@ pub async fn run(no_wait: bool) -> Result<()> {
             }
         }
         Err(e) => {
-            fail_step(&pb, 8, TOTAL_STEPS, "Failed to verify installation");
+            fail_step(&pb, 6, TOTAL_STEPS, "Failed to verify installation");
             println!(
                 "\n{}: {}",
                 "Warning".yellow().bold(),
@@ -292,14 +312,14 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 9: Upload source to VPS
-    let pb = step_bar(9, TOTAL_STEPS, "Uploading source to VPS...");
+    // Step 7: Upload source to VPS
+    let pb = step_bar(7, TOTAL_STEPS, "Uploading source to VPS...");
     match crate::deploy::upload_source(&state) {
         Ok(()) => {
-            finish_step(&pb, 9, TOTAL_STEPS, "Source uploaded to VPS");
+            finish_step(&pb, 7, TOTAL_STEPS, "Source uploaded to VPS");
         }
         Err(e) => {
-            fail_step(&pb, 9, TOTAL_STEPS, "Failed to upload source");
+            fail_step(&pb, 7, TOTAL_STEPS, "Failed to upload source");
             println!(
                 "\n{}: {}",
                 "Error".red().bold(),
@@ -311,18 +331,18 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 10: Build daemon on VPS
+    // Step 8: Build daemon on VPS
     let pb = step_bar(
-        10,
+        8,
         TOTAL_STEPS,
         "Building daemon on VPS (this may take 3-5 minutes)...",
     );
     match crate::deploy::build_daemon(&state) {
         Ok(()) => {
-            finish_step(&pb, 10, TOTAL_STEPS, "Daemon built successfully");
+            finish_step(&pb, 8, TOTAL_STEPS, "Daemon built successfully");
         }
         Err(e) => {
-            fail_step(&pb, 10, TOTAL_STEPS, "Daemon build failed");
+            fail_step(&pb, 8, TOTAL_STEPS, "Daemon build failed");
             println!(
                 "\n{}: {}",
                 "Error".red().bold(),
@@ -334,14 +354,14 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 11: Install daemon + config + systemd
-    let pb = step_bar(11, TOTAL_STEPS, "Installing daemon service...");
+    // Step 9: Install daemon + config + systemd
+    let pb = step_bar(9, TOTAL_STEPS, "Installing daemon service...");
     match crate::deploy::install_daemon(&state, &config) {
         Ok(()) => {
-            finish_step(&pb, 11, TOTAL_STEPS, "Daemon service installed");
+            finish_step(&pb, 9, TOTAL_STEPS, "Daemon service installed");
         }
         Err(e) => {
-            fail_step(&pb, 11, TOTAL_STEPS, "Failed to install daemon service");
+            fail_step(&pb, 9, TOTAL_STEPS, "Failed to install daemon service");
             println!(
                 "\n{}: {}",
                 "Error".red().bold(),
@@ -353,14 +373,14 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 12: Verify daemon is running
-    let pb = step_bar(12, TOTAL_STEPS, "Verifying daemon is running...");
+    // Step 10: Verify daemon is running
+    let pb = step_bar(10, TOTAL_STEPS, "Verifying daemon is running...");
     match crate::deploy::verify_daemon(&state) {
         Ok(()) => {
-            finish_step(&pb, 12, TOTAL_STEPS, "Daemon is running");
+            finish_step(&pb, 10, TOTAL_STEPS, "Daemon is running");
         }
         Err(e) => {
-            fail_step(&pb, 12, TOTAL_STEPS, "Daemon is not running");
+            fail_step(&pb, 10, TOTAL_STEPS, "Daemon is not running");
             println!(
                 "\n{}: {}",
                 "Warning".yellow().bold(),
@@ -369,24 +389,38 @@ pub async fn run(no_wait: bool) -> Result<()> {
         }
     }
 
-    // Step 13: Update state to running
-    let pb = step_bar(13, TOTAL_STEPS, "Finalizing...");
+    // Step 11: Update state to running
+    let pb = step_bar(11, TOTAL_STEPS, "Finalizing...");
     state.status = Some("running".to_string());
     state.save()?;
-    finish_step(&pb, 13, TOTAL_STEPS, "State saved");
+    finish_step(&pb, 11, TOTAL_STEPS, "State saved");
 
     println!(
         "\n{}",
         "VPS provisioned and daemon deployed successfully!".bold().green(),
     );
-    println!(
-        "  Connect with: {}",
-        "cloudcode ssh".bold()
-    );
-    println!(
-        "  Check status: {}",
-        "cloudcode status".bold()
-    );
+    println!("\nNext steps:");
+    println!("  {}              # Create a Claude Code session", "cloudcode spawn".bold());
+    println!("  {}  # Connect interactively", "cloudcode open <name>".bold());
+
+    if let Some(ref claude) = config.claude {
+        if claude.auth_method == "oauth" {
+            println!("\n{}  OAuth login required", "!".yellow().bold());
+            println!("  Run {} after spawning to log in.", "cloudcode open <name>".bold());
+            println!("  Claude will show a login URL — {} to copy it.", "highlight and copy the URL manually".bold());
+            println!("  (Pressing 'c' copies to the VPS clipboard, not your local machine.)");
+            println!("  Open the URL in your local browser to complete the auth flow.");
+            if config.telegram.is_some() {
+                println!("\n{}  Telegram will not work until OAuth login is complete.", "!".yellow().bold());
+            }
+        }
+    }
+
+    if config.telegram.is_some() {
+        println!("\nTelegram:");
+        println!("  Your bot is active! Message it to start chatting.");
+        println!("  Send /spawn to create a session, then type any message.");
+    }
 
     Ok(())
 }

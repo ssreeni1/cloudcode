@@ -810,52 +810,58 @@ fn draw_console_log(f: &mut Frame, app: &App, area: Rect) {
 fn draw_command_reference(f: &mut Frame, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
-    let commands: Vec<(&str, &str, &str)> = vec![
-        ("VPS & Sessions", "", ""),
-        ("  /up", "", "Provision VPS"),
-        ("  /down", "", "Destroy VPS"),
-        ("  /status", "", "Show VPS & session status"),
-        ("  /spawn", " [name]", "Create a Claude session"),
-        ("  /list", "", "List active sessions"),
-        ("  /open", " <session>", "Open session interactively"),
-        ("  /send", " <s> <msg>", "Send message to session"),
-        ("  /kill", " <session>", "Kill a session"),
-        ("", "", ""),
-        ("System", "", ""),
-        ("  /restart", "", "Restart daemon on VPS"),
-        ("  /logs", " [target]", "View logs (setup/daemon)"),
-        ("  /ssh", " [cmd]", "SSH to the VPS"),
-        ("", "", ""),
-        ("Other", "", ""),
-        ("  /init", "", "Re-run setup wizard"),
-        ("  /help", "", "Show this reference"),
-        ("  /quit", "", "Exit cloudcode"),
+    // (slash_cmd, args, description, cli_equivalent)
+    let commands: Vec<(&str, &str, &str, &str)> = vec![
+        ("VPS & Sessions", "", "", ""),
+        ("  /up", "", "Provision VPS", "cloudcode up"),
+        ("  /down", "", "Destroy VPS", "cloudcode down"),
+        ("  /status", "", "Show VPS & session status", "cloudcode status"),
+        ("  /spawn", " [name]", "Create a Claude session", "cloudcode spawn"),
+        ("  /list", "", "List active sessions", "cloudcode list"),
+        ("  /open", " <session>", "Open session interactively", "cloudcode open <s>"),
+        ("  /send", " <s> <msg>", "Send message to session", "cloudcode send <s> <m>"),
+        ("  /kill", " <session>", "Kill a session", "cloudcode kill <s>"),
+        ("", "", "", ""),
+        ("System", "", "", ""),
+        ("  /restart", "", "Restart daemon on VPS", "cloudcode restart"),
+        ("  /logs", " [target]", "View logs (setup/daemon)", "cloudcode logs"),
+        ("  /ssh", " [cmd]", "SSH to the VPS", "cloudcode ssh"),
+        ("", "", "", ""),
+        ("Other", "", "", ""),
+        ("  /init", "", "Re-run setup wizard", "cloudcode init"),
+        ("  /help", "", "Show this reference", ""),
+        ("  /quit", "", "Exit cloudcode", ""),
     ];
 
     let lines: Vec<Line> = commands
         .iter()
-        .map(|(cmd, args, desc)| {
+        .map(|(cmd, args, desc, cli)| {
             if desc.is_empty() && args.is_empty() {
                 if cmd.is_empty() {
                     Line::from("")
                 } else {
-                    // Section header
                     Line::from(Span::styled(
                         *cmd,
                         Style::default().fg(Color::White).bold(),
                     ))
                 }
             } else {
-                // Command line
                 let cmd_width = 12;
                 let args_width = 12;
                 let padded_cmd = format!("{:<width$}", cmd, width = cmd_width);
                 let padded_args = format!("{:<width$}", args, width = args_width);
-                Line::from(vec![
+                let mut spans = vec![
                     Span::styled(padded_cmd, Style::default().fg(BLUE)),
                     Span::styled(padded_args, Style::default().fg(DIM)),
                     Span::styled(*desc, Style::default().fg(Color::White)),
-                ])
+                ];
+                if !cli.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  ({cli})"),
+                        Style::default().fg(DIM),
+                    ));
+                }
+                Line::from(spans)
             }
         })
         .collect();
