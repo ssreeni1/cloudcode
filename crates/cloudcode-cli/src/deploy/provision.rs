@@ -552,6 +552,17 @@ impl DeploymentContext {
     }
 
     async fn step_wait_for_ssh(&mut self, reporter: &ConsoleReporter) -> Result<()> {
+        // Clear any stale known_hosts entry for this IP so accept-new works
+        if let Some(ref ip) = self.state.server_ip {
+            if let Ok(known_hosts) = crate::ssh::known_hosts_path() {
+                if known_hosts.exists() {
+                    let _ = std::process::Command::new("ssh-keygen")
+                        .args(["-R", ip, "-f", &known_hosts.to_string_lossy()])
+                        .output();
+                }
+            }
+        }
+
         let pb = reporter.start(
             DeploymentStage::WaitForSsh,
             &self.server_type,
