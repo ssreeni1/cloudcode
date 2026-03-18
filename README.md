@@ -14,19 +14,17 @@ Sessions persist across disconnects. You can start a task from your laptop, chec
 
 ## Install
 
-### Homebrew (recommended)
-
-```bash
-brew install ssreeni1/tap/cloudcode
-```
-
-### One-liner (macOS / Linux)
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ssreeni1/cloudcode/main/install.sh | bash
 ```
 
-This downloads the latest release binary for your platform and installs it to `/usr/local/bin/cloudcode`.
+This downloads the latest release binary for your platform and installs it to `/usr/local/bin/cloudcode`. No dependencies required.
+
+### Homebrew
+
+```bash
+brew install ssreeni1/tap/cloudcode
+```
 
 ### From source
 
