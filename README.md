@@ -17,8 +17,7 @@ Sessions persist across disconnects. You can start a task from your laptop, chec
 ### Homebrew (recommended)
 
 ```bash
-brew tap ssreeni1/tap
-brew install cloudcode
+brew install ssreeni1/tap/cloudcode
 ```
 
 ### One-liner (macOS / Linux)
