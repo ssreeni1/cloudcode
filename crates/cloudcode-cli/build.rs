@@ -117,5 +117,6 @@ fn main() {
         }
     }
 
+    println!("cargo:warning=build.rs: generated code:\n{}", code.replace('\n', " | "));
     fs::write(format!("{}/embedded_daemons.rs", out_dir), code).unwrap();
 }
