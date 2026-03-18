@@ -2,8 +2,11 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::AuthMethod;
 use crate::ssh::ssh_base_args;
 use crate::state::VpsState;
+
+pub mod provision;
 
 // Embedded daemon binaries (populated by build.rs when pre-built binaries are available)
 mod embedded {
@@ -11,11 +14,7 @@ mod embedded {
 }
 
 fn cloudcode_cache_dir() -> Result<PathBuf> {
-    let dir = dirs::home_dir()
-        .context("Could not determine home directory")?
-        .join(".cloudcode")
-        .join("cache")
-        .join("embedded-daemons");
+    let dir = crate::paths::embedded_daemon_cache_dir()?;
     std::fs::create_dir_all(&dir).context("Failed to create embedded daemon cache")?;
     #[cfg(unix)]
     {
@@ -41,14 +40,168 @@ pub fn target_triple_for_server_type(server_type: &str) -> &'static str {
     }
 }
 
-/// Get the daemon binary for a target: try embedded first, fall back to cross-compilation.
+/// Get the daemon binary for a target.
+/// Tries in order: embedded binary → local cross-compilation → remote build on VPS.
+/// The `state` parameter is needed for the remote build fallback.
 pub fn get_daemon_binary(target: &str) -> Result<PathBuf> {
-    // Try embedded binary first
+    // 1. Try embedded binary (release builds have these baked in)
     if let Some(path) = extract_embedded_daemon(target)? {
         return Ok(path);
     }
-    // Fall back to cross-compilation
-    cross_compile_daemon(target)
+
+    // 2. Try local cross-compilation with cargo-zigbuild
+    eprintln!(
+        "  {} No embedded daemon binary found (dev build). Trying local cross-compilation...",
+        "→".to_string()
+    );
+    match cross_compile_daemon(target) {
+        Ok(path) => return Ok(path),
+        Err(e) => {
+            eprintln!(
+                "  {} Cross-compilation unavailable: {}",
+                "→".to_string(),
+                e
+            );
+            eprintln!("  {} To enable fast local cross-compilation, run:", "→".to_string());
+            eprintln!("      brew install zig");
+            eprintln!("      cargo install cargo-zigbuild");
+            eprintln!("      rustup target add {target}");
+            eprintln!();
+        }
+    }
+
+    // 3. Fall back to remote build on the VPS (slowest, but always works)
+    eprintln!(
+        "  {} Falling back to building on the VPS (this will take 3-5 minutes)...",
+        "→".to_string()
+    );
+    remote_build_daemon(target)
+}
+
+/// Build the daemon on the VPS by uploading source and compiling remotely.
+/// This is the slowest path but requires no local cross-compilation tools.
+fn remote_build_daemon(target: &str) -> Result<PathBuf> {
+    // We need the VPS state to SSH into it
+    let state = VpsState::load()?;
+    if !state.is_provisioned() {
+        anyhow::bail!("No VPS provisioned — cannot do remote build");
+    }
+    let ip = state.server_ip.as_ref().context("No server IP")?;
+
+    // Upload source
+    upload_source(&state)?;
+
+    // Install Rust on VPS if not present
+    let check = std::process::Command::new("ssh")
+        .args(ssh_command_args(
+            ip,
+            "source $HOME/.cargo/env 2>/dev/null; which cargo",
+        )?)
+        .output()
+        .context("Failed to check for Rust on VPS")?;
+
+    if !check.status.success() {
+        eprintln!("  {} Installing Rust toolchain on VPS...", "→".to_string());
+        let install = std::process::Command::new("ssh")
+            .args(ssh_command_args(
+                ip,
+                "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+            )?)
+            .status()
+            .context("Failed to install Rust on VPS")?;
+        if !install.success() {
+            anyhow::bail!("Failed to install Rust toolchain on VPS");
+        }
+    }
+
+    // Build on VPS
+    let output = std::process::Command::new("ssh")
+        .args(ssh_command_args(
+            ip,
+            "source $HOME/.cargo/env && cd /home/claude/cloudcode-src && cargo build --release -p cloudcode-daemon 2>&1",
+        )?)
+        .output()
+        .context("Failed to build daemon on VPS")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!("Remote daemon build failed:\n{}\n{}", stdout, stderr);
+    }
+
+    // Download the binary from VPS to local temp
+    let tmp_path = std::env::temp_dir().join(format!("cloudcode-daemon-remote-{target}"));
+    let mut scp_args = ssh_base_args(ip)?;
+    scp_args.extend([
+        format!("claude@{ip}:/home/claude/cloudcode-src/target/release/cloudcode-daemon"),
+        tmp_path.to_string_lossy().to_string(),
+    ]);
+    let status = std::process::Command::new("scp")
+        .args(&scp_args)
+        .status()
+        .context("Failed to download built binary from VPS")?;
+
+    if !status.success() {
+        anyhow::bail!("Failed to download daemon binary from VPS");
+    }
+
+    Ok(tmp_path)
+}
+
+/// Upload project source to VPS via rsync (used by remote build fallback).
+fn upload_source(state: &VpsState) -> Result<()> {
+    let ip = state.server_ip.as_ref().context("No server IP")?;
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .context("Could not determine workspace root")?;
+
+    // Create target directory
+    let mkdir_status = std::process::Command::new("ssh")
+        .args(ssh_command_args(ip, "mkdir -p /home/claude/cloudcode-src")?)
+        .status()
+        .context("Failed to create remote directory")?;
+
+    if !mkdir_status.success() {
+        anyhow::bail!("Failed to create remote directory");
+    }
+
+    // Build rsync -e argument with SSH options
+    let ssh_args = ssh_base_args(ip)?;
+    let ssh_cmd = ssh_args
+        .iter()
+        .map(|a| {
+            if a.contains(' ') || a.contains('\'') {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rsh = format!("ssh {ssh_cmd}");
+
+    let status = std::process::Command::new("rsync")
+        .args([
+            "-az",
+            "--exclude",
+            "target/",
+            "--exclude",
+            ".git/",
+            "-e",
+            &rsh,
+            &format!("{}/", workspace_root.display()),
+            &format!("claude@{ip}:/home/claude/cloudcode-src/"),
+        ])
+        .status()
+        .context("Failed to rsync source. Is rsync installed?")?;
+
+    if !status.success() {
+        anyhow::bail!("rsync failed");
+    }
+    Ok(())
 }
 
 /// Extract an embedded daemon binary to a temp file, if one was baked in at compile time.
@@ -209,7 +362,7 @@ pub fn install_daemon(state: &VpsState, config: &crate::config::Config) -> Resul
     // Build the secrets env file content
     let mut env_file_content = String::new();
     if let Some(ref claude) = config.claude {
-        if claude.auth_method == "api_key" {
+        if matches!(claude.auth_method, AuthMethod::ApiKey) {
             if let Some(ref key) = claude.api_key {
                 env_file_content.push_str(&format!("ANTHROPIC_API_KEY={}\n", key));
             }
