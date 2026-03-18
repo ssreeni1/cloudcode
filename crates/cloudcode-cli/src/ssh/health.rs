@@ -13,6 +13,7 @@ pub enum CloudInitStatus {
 /// Poll VPS for cloud-init completion
 pub async fn wait_for_cloud_init(state: &VpsState, timeout: Duration) -> Result<CloudInitStatus> {
     let start = std::time::Instant::now();
+    let mut cloud_init_done_since: Option<std::time::Instant> = None;
 
     loop {
         if start.elapsed() > timeout {
@@ -45,13 +46,18 @@ pub async fn wait_for_cloud_init(state: &VpsState, timeout: Duration) -> Result<
                     return Ok(CloudInitStatus::Failed { error });
                 }
                 if text.contains("status: done") {
-                    // cloud-init done but our marker missing = our script failed
-                    return Ok(CloudInitStatus::Failed {
-                        error: "cloud-init completed but cloudcode setup marker not found"
-                            .to_string(),
-                    });
+                    // cloud-init reports done but our marker is missing.
+                    // The setup script may still be running — give it up to
+                    // 120 seconds grace period before declaring failure.
+                    let done_at = cloud_init_done_since.get_or_insert_with(std::time::Instant::now);
+                    if done_at.elapsed() > Duration::from_secs(120) {
+                        return Ok(CloudInitStatus::Failed {
+                            error: "cloud-init completed but cloudcode setup marker not found. Check /var/log/cloudcode-setup.log"
+                                .to_string(),
+                        });
+                    }
                 }
-                // Still running, continue polling
+                // Still running or in grace period, continue polling
             }
         }
 
