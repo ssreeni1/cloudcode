@@ -43,7 +43,7 @@ pub async fn run(name: Option<String>) -> Result<()> {
             );
 
             if let Some(ref claude) = config.claude {
-                if claude.auth_method == "oauth" {
+                if claude.uses_oauth() {
                     println!(
                         "\n{}  Run {} (or {}) to complete OAuth login.",
                         "!".yellow().bold(),

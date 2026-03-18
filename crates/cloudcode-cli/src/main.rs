@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod deploy;
 mod hetzner;
+mod paths;
 mod ssh;
 mod state;
 mod tui;
@@ -37,6 +38,8 @@ async fn main() -> anyhow::Result<()> {
         }) => commands::up::run(no_wait, server_type).await,
         Some(Command::Down { force }) => commands::down::run(force).await,
         Some(Command::Status) => commands::status::run().await,
+        Some(Command::Doctor) => commands::doctor::run().await,
+        Some(Command::Security) => commands::security::run().await,
         Some(Command::Spawn { name }) => commands::spawn::run(name).await,
         Some(Command::List) => commands::list::run().await,
         Some(Command::Open { session }) => commands::attach::run(session).await,

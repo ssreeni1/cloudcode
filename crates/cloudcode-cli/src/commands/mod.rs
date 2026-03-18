@@ -1,10 +1,13 @@
 pub mod attach;
+pub mod doctor;
 pub mod down;
 pub mod init;
 pub mod kill;
 pub mod list;
 pub mod logs;
 pub mod restart;
+pub mod security;
+pub mod security_report;
 pub mod send;
 pub mod spawn;
 pub mod ssh_cmd;

@@ -7,7 +7,7 @@ use crate::config::Config;
 use crate::hetzner::client::{HetznerClient, estimate_monthly_cost};
 use crate::ssh::health::{self, CloudInitStatus};
 use crate::ssh::tunnel::DaemonClient;
-use crate::state::VpsState;
+use crate::state::{VpsState, VpsStatus};
 
 pub async fn run() -> Result<()> {
     let state = VpsState::load()?;
@@ -79,7 +79,7 @@ pub async fn run() -> Result<()> {
     }
 
     // If state is initializing, check cloud-init status
-    if state.status.as_deref() == Some("initializing") {
+    if state.status == Some(VpsStatus::Initializing) {
         println!();
         println!(
             "  {:<12} {}",

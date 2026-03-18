@@ -91,11 +91,11 @@ runcmd:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ClaudeConfig;
+    use crate::config::{AuthMethod, ClaudeConfig};
 
     fn dummy_claude_config() -> ClaudeConfig {
         ClaudeConfig {
-            auth_method: "api_key".to_string(),
+            auth_method: AuthMethod::ApiKey,
             api_key: Some("sk-test".to_string()),
             oauth_token: None,
         }

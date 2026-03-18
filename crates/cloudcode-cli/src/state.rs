@@ -3,18 +3,37 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VpsStatus {
+    Creating,
+    Initializing,
+    Running,
+    Error,
+}
+
+impl VpsStatus {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Initializing => "initializing",
+            Self::Running => "running",
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct VpsState {
     pub server_id: Option<u64>,
     pub server_ip: Option<String>,
     pub ssh_key_id: Option<u64>,
-    pub status: Option<String>,
+    pub status: Option<VpsStatus>,
 }
 
 impl VpsState {
     pub fn path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(".cloudcode").join("state.json"))
+        crate::paths::state_file()
     }
 
     pub fn load() -> Result<Self> {
@@ -60,6 +79,10 @@ impl VpsState {
 
     pub fn is_provisioned(&self) -> bool {
         self.server_id.is_some() && self.server_ip.is_some()
+    }
+
+    pub fn status_name(&self) -> Option<&'static str> {
+        self.status.as_ref().map(VpsStatus::as_str)
     }
 }
 
@@ -121,7 +144,7 @@ mod tests {
             server_id: Some(1),
             server_ip: Some("192.168.1.1".to_string()),
             ssh_key_id: Some(99),
-            status: Some("running".to_string()),
+            status: Some(VpsStatus::Running),
         };
         assert!(state.is_provisioned());
     }
@@ -143,7 +166,7 @@ mod tests {
             server_id: Some(12345),
             server_ip: Some("203.0.113.50".to_string()),
             ssh_key_id: Some(678),
-            status: Some("running".to_string()),
+            status: Some(VpsStatus::Running),
         };
         let json = serde_json::to_string_pretty(&state).unwrap();
         let deserialized: VpsState = serde_json::from_str(&json).unwrap();
@@ -151,7 +174,7 @@ mod tests {
         assert_eq!(deserialized.server_id, Some(12345));
         assert_eq!(deserialized.server_ip.as_deref(), Some("203.0.113.50"));
         assert_eq!(deserialized.ssh_key_id, Some(678));
-        assert_eq!(deserialized.status.as_deref(), Some("running"));
+        assert!(matches!(deserialized.status, Some(VpsStatus::Running)));
     }
 
     #[test]
@@ -160,7 +183,7 @@ mod tests {
             server_id: Some(1),
             server_ip: None,
             ssh_key_id: None,
-            status: Some("initializing".to_string()),
+            status: Some(VpsStatus::Initializing),
         };
         let json = serde_json::to_string(&state).unwrap();
         let deserialized: VpsState = serde_json::from_str(&json).unwrap();
@@ -168,7 +191,7 @@ mod tests {
         assert_eq!(deserialized.server_id, Some(1));
         assert!(deserialized.server_ip.is_none());
         assert!(deserialized.ssh_key_id.is_none());
-        assert_eq!(deserialized.status.as_deref(), Some("initializing"));
+        assert!(matches!(deserialized.status, Some(VpsStatus::Initializing)));
     }
 
     #[test]
@@ -188,7 +211,7 @@ mod tests {
             server_id: Some(1),
             server_ip: Some("x".to_string()),
             ssh_key_id: Some(2),
-            status: Some("s".to_string()),
+            status: Some(VpsStatus::Running),
         };
         let json = serde_json::to_string(&state).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -209,7 +232,7 @@ mod tests {
             server_id: None,
             server_ip: None,
             ssh_key_id: Some(42),
-            status: Some("creating".to_string()),
+            status: Some(VpsStatus::Creating),
         };
         assert!(!state.is_provisioned());
         assert!(state.ssh_key_id.is_some());
@@ -223,7 +246,7 @@ mod tests {
             server_id: None,
             server_ip: None,
             ssh_key_id: Some(99),
-            status: Some("creating".to_string()),
+            status: Some(VpsStatus::Creating),
         };
         // down should check: !is_provisioned() && ssh_key_id.is_some()
         assert!(!state.is_provisioned() && state.ssh_key_id.is_some());
@@ -242,7 +265,7 @@ mod tests {
             server_id: Some(123),
             server_ip: Some("10.0.0.1".to_string()),
             ssh_key_id: Some(456),
-            status: Some("running".to_string()),
+            status: Some(VpsStatus::Running),
         };
         assert!(state.is_provisioned());
         // down should proceed with full deprovision
@@ -254,14 +277,26 @@ mod tests {
             server_id: None,
             server_ip: None,
             ssh_key_id: Some(42),
-            status: Some("creating".to_string()),
+            status: Some(VpsStatus::Creating),
         };
         let json = serde_json::to_string_pretty(&state).unwrap();
         let deserialized: VpsState = serde_json::from_str(&json).unwrap();
         assert!(deserialized.server_id.is_none());
         assert!(deserialized.server_ip.is_none());
         assert_eq!(deserialized.ssh_key_id, Some(42));
-        assert_eq!(deserialized.status.as_deref(), Some("creating"));
+        assert!(matches!(deserialized.status, Some(VpsStatus::Creating)));
+    }
+
+    #[test]
+    fn vps_status_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&VpsStatus::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VpsStatus::Initializing).unwrap(),
+            "\"initializing\""
+        );
     }
 
     #[test]

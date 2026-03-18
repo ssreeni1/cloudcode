@@ -75,6 +75,10 @@ pub enum Command {
     },
     /// Show VPS and session status
     Status,
+    /// Inspect local security-relevant state
+    Doctor,
+    /// Explain the trust model and revoke/rotate steps
+    Security,
     /// Restart the cloudcode daemon on the VPS
     Restart,
     /// View logs from the VPS

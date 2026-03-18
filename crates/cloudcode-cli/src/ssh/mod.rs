@@ -41,13 +41,13 @@ pub fn ssh_base_args(_ip: &str) -> Result<Vec<String>> {
 
 /// Path to the SSH ControlMaster socket
 pub fn control_socket_path() -> Result<PathBuf> {
-    let dir = Config::dir()?;
+    let dir = crate::paths::config_dir()?;
     Ok(dir.join("ssh-control-%C"))
 }
 
 /// Path to the managed known_hosts file used by cloudcode.
 pub fn known_hosts_path() -> Result<PathBuf> {
-    Ok(Config::dir()?.join("known_hosts"))
+    crate::paths::known_hosts()
 }
 
 fn ensure_known_hosts_file(path: &PathBuf) -> Result<()> {
@@ -77,8 +77,7 @@ fn ensure_known_hosts_file(path: &PathBuf) -> Result<()> {
 
 /// Path to the daemon forwarding socket for a given server
 pub fn daemon_socket_path(server_id: u64) -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    let dir = home.join(".cloudcode").join("sockets");
+    let dir = crate::paths::sockets_dir()?;
     std::fs::create_dir_all(&dir).context("Failed to create sockets directory")?;
     Ok(dir.join(format!("daemon-{}.sock", server_id)))
 }

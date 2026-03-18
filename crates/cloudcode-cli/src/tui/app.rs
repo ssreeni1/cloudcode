@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::config::{ClaudeConfig, Config, HetznerConfig, TelegramConfig};
+use crate::config::{AuthMethod, ClaudeConfig, Config, HetznerConfig, TelegramConfig};
 use crate::hetzner::client::{HetznerClient, ServerTypeInfo};
 use crate::state::VpsState;
 
@@ -498,7 +498,7 @@ impl App {
                 let api_key = self.api_key_input.value().trim().to_string();
                 if !api_key.is_empty() {
                     self.config.claude = Some(ClaudeConfig {
-                        auth_method: "api_key".to_string(),
+                        auth_method: AuthMethod::ApiKey,
                         api_key: Some(api_key),
                         oauth_token: None,
                     });
@@ -517,7 +517,7 @@ impl App {
         match key.code {
             KeyCode::Enter => {
                 self.config.claude = Some(ClaudeConfig {
-                    auth_method: "oauth".to_string(),
+                    auth_method: AuthMethod::Oauth,
                     api_key: None,
                     oauth_token: None,
                 });
@@ -603,7 +603,7 @@ impl App {
         tokio::spawn(async move {
             if !ssh_key_exists {
                 if let Ok(ssh_key_path) = Config::ssh_key_path() {
-                    let _ = std::fs::create_dir_all(Config::dir().unwrap_or_default());
+                    let _ = Config::ensure_dir();
                     let _ = ProcessCommand::new("ssh-keygen")
                         .args([
                             "-t",
@@ -1210,7 +1210,7 @@ impl App {
         self.config
             .claude
             .as_ref()
-            .map(|c| c.auth_method == "oauth")
+            .map(|c| c.uses_oauth())
             .unwrap_or(false)
     }
 }

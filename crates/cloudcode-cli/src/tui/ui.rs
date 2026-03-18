@@ -618,16 +618,17 @@ fn draw_complete(f: &mut Frame, app: &App, area: Rect) {
     }
 
     if let Some(ref c) = app.config.claude {
-        let auth_display = if c.auth_method == "api_key" {
+        let auth_display = if c.uses_api_key() {
             format!(
-                "API Key ({})",
+                "{} ({})",
+                c.auth_display_name(),
                 c.api_key
                     .as_deref()
                     .map(App::mask_secret)
                     .unwrap_or_default()
             )
         } else {
-            "OAuth".to_string()
+            c.auth_display_name().to_string()
         };
         lines.push(Line::from(vec![
             Span::styled("  Claude:    ", Style::default().fg(Color::White).bold()),
@@ -694,7 +695,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     // Header with VPS status
     let vps_status_span = if app.vps_state.is_provisioned() {
         let ip = app.vps_state.server_ip.as_deref().unwrap_or("unknown");
-        let status = app.vps_state.status.as_deref().unwrap_or("unknown");
+        let status = app.vps_state.status_name().unwrap_or("unknown");
         Span::styled(
             format!("  VPS: {status} ({ip})"),
             Style::default().fg(GREEN),
@@ -1049,7 +1050,7 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     if app.vps_state.is_provisioned() {
         let ip = app.vps_state.server_ip.as_deref().unwrap_or("unknown");
-        let status = app.vps_state.status.as_deref().unwrap_or("unknown");
+        let status = app.vps_state.status_name().unwrap_or("unknown");
         lines.push(Line::from(vec![
             Span::styled("  ✓ ", Style::default().fg(GREEN).bold()),
             Span::styled(

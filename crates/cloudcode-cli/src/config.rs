@@ -16,11 +16,52 @@ pub struct HetznerConfig {
     pub api_token: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    ApiKey,
+    Oauth,
+}
+
+impl AuthMethod {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::Oauth => "oauth",
+        }
+    }
+
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "API Key",
+            Self::Oauth => "OAuth",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClaudeConfig {
-    pub auth_method: String, // "api_key" or "oauth"
+    pub auth_method: AuthMethod,
     pub api_key: Option<String>,
     pub oauth_token: Option<String>,
+}
+
+impl ClaudeConfig {
+    pub fn uses_api_key(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::ApiKey)
+    }
+
+    pub fn uses_oauth(&self) -> bool {
+        matches!(self.auth_method, AuthMethod::Oauth)
+    }
+
+    pub const fn auth_label(&self) -> &'static str {
+        self.auth_method.as_str()
+    }
+
+    pub const fn auth_display_name(&self) -> &'static str {
+        self.auth_method.display_name()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -38,12 +79,11 @@ pub struct TelegramConfig {
 
 impl Config {
     pub fn dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(home.join(".cloudcode"))
+        crate::paths::config_dir()
     }
 
     pub fn path() -> Result<PathBuf> {
-        Ok(Self::dir()?.join("config.toml"))
+        crate::paths::config_file()
     }
 
     pub fn load() -> Result<Self> {
@@ -57,13 +97,7 @@ impl Config {
     }
 
     pub fn save(&self) -> Result<()> {
-        let dir = Self::dir()?;
-        fs::create_dir_all(&dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-        }
+        Self::ensure_dir()?;
         let path = Self::path()?;
         let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
         fs::write(&path, &content)?;
@@ -77,11 +111,22 @@ impl Config {
     }
 
     pub fn ssh_key_path() -> Result<PathBuf> {
-        Ok(Self::dir()?.join("id_ed25519"))
+        crate::paths::ssh_key()
     }
 
     pub fn ssh_pub_key_path() -> Result<PathBuf> {
-        Ok(Self::dir()?.join("id_ed25519.pub"))
+        crate::paths::ssh_pub_key()
+    }
+
+    pub fn ensure_dir() -> Result<PathBuf> {
+        let dir = Self::dir()?;
+        fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(dir)
     }
 }
 
@@ -116,7 +161,7 @@ mod tests {
                 api_token: "hcloud-token-123".to_string(),
             }),
             claude: Some(ClaudeConfig {
-                auth_method: "api_key".to_string(),
+                auth_method: AuthMethod::ApiKey,
                 api_key: Some("sk-ant-key".to_string()),
                 oauth_token: None,
             }),
@@ -138,7 +183,7 @@ mod tests {
         assert_eq!(h.api_token, "hcloud-token-123");
 
         let c = deserialized.claude.unwrap();
-        assert_eq!(c.auth_method, "api_key");
+        assert!(matches!(c.auth_method, AuthMethod::ApiKey));
         assert_eq!(c.api_key, Some("sk-ant-key".to_string()));
         assert!(c.oauth_token.is_none());
 
@@ -225,7 +270,7 @@ mod tests {
         let config = Config {
             hetzner: None,
             claude: Some(ClaudeConfig {
-                auth_method: "oauth".to_string(),
+                auth_method: AuthMethod::Oauth,
                 api_key: None,
                 oauth_token: Some("oauth-tok-xyz".to_string()),
             }),
@@ -237,9 +282,21 @@ mod tests {
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
 
         let c = deserialized.claude.unwrap();
-        assert_eq!(c.auth_method, "oauth");
+        assert!(matches!(c.auth_method, AuthMethod::Oauth));
         assert!(c.api_key.is_none());
         assert_eq!(c.oauth_token, Some("oauth-tok-xyz".to_string()));
+    }
+
+    #[test]
+    fn auth_method_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AuthMethod::ApiKey).unwrap(),
+            "\"api_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthMethod::Oauth).unwrap(),
+            "\"oauth\""
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input, Select};
 use std::process::Command as ProcessCommand;
 
-use crate::config::{ClaudeConfig, Config, HetznerConfig, TelegramConfig};
+use crate::config::{AuthMethod, ClaudeConfig, Config, HetznerConfig, TelegramConfig};
 use crate::hetzner::client::HetznerClient;
 
 /// Mask a secret string, showing only the first 4 characters followed by dots.
@@ -44,6 +44,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     check_required_tools()?;
 
     println!("\n{}", "Welcome to cloudcode setup!".bold().cyan());
+    crate::commands::security::print_trust_summary(true);
 
     if auto {
         println!(
@@ -163,7 +164,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                     mask_secret(&api_key).dimmed()
                 );
                 ClaudeConfig {
-                    auth_method: "api_key".to_string(),
+                    auth_method: AuthMethod::ApiKey,
                     api_key: Some(api_key),
                     oauth_token: None,
                 }
@@ -182,7 +183,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                     "Claude Code will prompt you to log in on first launch.".dimmed()
                 );
                 ClaudeConfig {
-                    auth_method: "oauth".to_string(),
+                    auth_method: AuthMethod::Oauth,
                     api_key: None,
                     oauth_token: None,
                 }
@@ -256,8 +257,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     let ssh_key_path = Config::ssh_key_path()?;
     if !ssh_key_path.exists() {
         println!("\n{}", "Generating SSH keypair...".bold().cyan());
-        let config_dir = Config::dir()?;
-        std::fs::create_dir_all(&config_dir)?;
+        Config::ensure_dir()?;
 
         let status = ProcessCommand::new("ssh-keygen")
             .args([
