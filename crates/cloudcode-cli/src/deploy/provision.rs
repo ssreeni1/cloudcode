@@ -580,7 +580,7 @@ impl DeploymentContext {
                     "The server may still be starting. Try /status or `cloudcode status` later."
                         .yellow()
                 );
-                return Ok(());
+                anyhow::bail!("SSH connectivity timed out. The VPS is provisioned — run /up again to retry from this point.");
             }
         }
         Ok(())

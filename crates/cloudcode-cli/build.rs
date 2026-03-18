@@ -61,8 +61,6 @@ fn main() {
     let checksums = parse_checksums(&checksums_path);
     println!("cargo:rerun-if-changed={}", checksums_path.display());
 
-    println!("cargo:warning=build.rs: CLOUDCODE_EMBED_DAEMONS={embed_raw:?}, bin_dir={bin_dir}");
-    println!("cargo:warning=build.rs: SHA256SUMS exists={}, entries={}", checksums_path.exists(), checksums.len());
 
     for (triple, const_name, checksum_const) in [
         (
@@ -80,9 +78,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path);
 
         let checksum_key = format!("{}/cloudcode-daemon", triple);
-        let bin_exists = Path::new(&path).exists();
-        println!("cargo:warning=build.rs: {triple}: binary exists={bin_exists}, embed={embed_binaries}");
-        if embed_binaries && bin_exists {
+        if embed_binaries && Path::new(&path).exists() {
             let abs = fs::canonicalize(&path).unwrap();
             let digest = sha256_hex(&abs);
             match checksums.get(&checksum_key) {
@@ -117,8 +113,5 @@ fn main() {
         }
     }
 
-    for line in code.lines() {
-        println!("cargo:warning=build.rs: >> {}", line);
-    }
     fs::write(format!("{}/embedded_daemons.rs", out_dir), code).unwrap();
 }
