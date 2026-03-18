@@ -156,3 +156,67 @@ jobs:
             release/cloudcode-*
             release/SHA256SUMS
           generate_release_notes: true
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME}"
+
+          SHA_ARM_MAC=$(grep 'aarch64-apple-darwin' release/SHA256SUMS | awk '{print $1}')
+          SHA_X86_MAC=$(grep 'x86_64-apple-darwin' release/SHA256SUMS | awk '{print $1}')
+          SHA_ARM_LINUX=$(grep 'aarch64-unknown-linux-gnu' release/SHA256SUMS | awk '{print $1}')
+          SHA_X86_LINUX=$(grep 'x86_64-unknown-linux-gnu' release/SHA256SUMS | awk '{print $1}')
+
+          cat > /tmp/cloudcode.rb << FORMULA
+          class Cloudcode < Formula
+            desc "Persistent cloud Claude Code sessions on Hetzner VPS"
+            homepage "https://github.com/ssreeni1/cloudcode"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/ssreeni1/cloudcode/releases/download/${TAG}/cloudcode-aarch64-apple-darwin"
+                sha256 "${SHA_ARM_MAC}"
+              end
+              on_intel do
+                url "https://github.com/ssreeni1/cloudcode/releases/download/${TAG}/cloudcode-x86_64-apple-darwin"
+                sha256 "${SHA_X86_MAC}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/ssreeni1/cloudcode/releases/download/${TAG}/cloudcode-aarch64-unknown-linux-gnu"
+                sha256 "${SHA_ARM_LINUX}"
+              end
+              on_intel do
+                url "https://github.com/ssreeni1/cloudcode/releases/download/${TAG}/cloudcode-x86_64-unknown-linux-gnu"
+                sha256 "${SHA_X86_LINUX}"
+              end
+            end
+
+            def install
+              binary = Dir.glob("cloudcode*").first
+              bin.install binary => "cloudcode"
+            end
+
+            test do
+              assert_match "cloudcode", shell_output("#{bin}/cloudcode --version")
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' /tmp/cloudcode.rb
+
+          git clone https://x-access-token:${GH_TOKEN}@github.com/ssreeni1/homebrew-tap.git /tmp/homebrew-tap
+          cp /tmp/cloudcode.rb /tmp/homebrew-tap/Formula/cloudcode.rb
+          cd /tmp/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cloudcode.rb
+          git commit -m "Update cloudcode to ${VERSION}" || echo "No changes"
+          git push
