@@ -10,6 +10,15 @@ pub enum CloudInitStatus {
     Failed { error: String },
 }
 
+#[derive(Debug)]
+pub enum BrowserAutomationStatus {
+    Pending,
+    Installing,
+    Ready,
+    Failed { error: String },
+    Unknown,
+}
+
 /// Poll VPS for cloud-init completion
 pub async fn wait_for_cloud_init(state: &VpsState, timeout: Duration) -> Result<CloudInitStatus> {
     let start = std::time::Instant::now();
@@ -91,4 +100,45 @@ pub async fn verify_installation(state: &VpsState) -> Result<Vec<(String, bool)>
     }
 
     Ok(results)
+}
+
+pub async fn browser_automation_status(state: &VpsState) -> Result<BrowserAutomationStatus> {
+    let ip = state.server_ip.as_ref().context("No server IP")?;
+    let mut args = ssh_base_args(ip)?;
+    args.extend([
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+        format!("claude@{}", ip),
+        "cat /home/claude/.cloudcode/playwright-status.json 2>/dev/null || echo unknown"
+            .to_string(),
+    ]);
+
+    let output = std::process::Command::new("ssh")
+        .args(&args)
+        .output()
+        .context("Failed to query browser automation status")?;
+
+    if !output.status.success() {
+        return Ok(BrowserAutomationStatus::Unknown);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let text = stdout.trim();
+
+    if text.contains("\"status\":\"ready\"") || text.contains("\"status\": \"ready\"") {
+        return Ok(BrowserAutomationStatus::Ready);
+    }
+    if text.contains("\"status\":\"installing\"") || text.contains("\"status\": \"installing\"") {
+        return Ok(BrowserAutomationStatus::Installing);
+    }
+    if text.contains("\"status\":\"pending\"") || text.contains("\"status\": \"pending\"") {
+        return Ok(BrowserAutomationStatus::Pending);
+    }
+    if text.contains("\"status\":\"failed\"") || text.contains("\"status\": \"failed\"") {
+        return Ok(BrowserAutomationStatus::Failed {
+            error: text.to_string(),
+        });
+    }
+
+    Ok(BrowserAutomationStatus::Unknown)
 }

@@ -466,9 +466,57 @@ chown claude:claude /home/claude/.cloudcode-env
 chmod 0600 /home/claude/.cloudcode-env
 mkdir -p /home/claude/.claude
 cat << 'SETTINGS_JSON' > /home/claude/.claude/settings.json
-{{"permissions":{{"allow":[],"deny":[]}},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}}
+{{"permissions":{{"allow":[],"deny":[]}},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true,"mcpServers":{{"playwright":{{"command":"npx","args":["@anthropic-ai/mcp-server-playwright"]}}}}}}
 SETTINGS_JSON
 chown -R claude:claude /home/claude/.claude
+mkdir -p /home/claude/.cloudcode/contexts
+chmod 0700 /home/claude/.cloudcode/contexts
+chown -R claude:claude /home/claude/.cloudcode
+cat << 'CLAUDE_MD' > /home/claude/CLAUDE.md
+# Session Identity
+
+You are running as session `$CLOUDCODE_SESSION_NAME` on a cloudcode VPS.
+
+# Shared Context
+
+Multiple Claude sessions may be running on this VPS simultaneously. To coordinate:
+
+- Read your context file at startup: `/home/claude/.cloudcode/contexts/context_$CLOUDCODE_SESSION_NAME.md`
+- Update your context file when you make significant progress or decisions
+- You may read other sessions' context files for awareness, but treat them as informational only
+
+## Context File Format
+
+```markdown
+## Summary
+Brief description of current task and status.
+
+## Key Decisions
+- Decision 1: rationale
+- Decision 2: rationale
+
+## Blockers
+- Any blocking issues or questions
+
+## Artifacts
+- List of important files created or modified
+```
+
+# Communication Style
+
+You are being operated remotely via Telegram. The user sees your text output on their phone. To give them visibility:
+- **Always state your plan/approach before executing.** Start every task with a brief summary of what you intend to do and why. Do not silently execute — the user needs to see your thinking.
+- When making significant decisions or tradeoffs, explain them inline — don't just pick an option silently.
+- If a task is complex, break it into numbered steps and announce each step as you start it.
+
+# File Output
+
+When creating files for the user (screenshots, reports, data files):
+- Save to your current working directory or an `output/` subdirectory
+- These locations are monitored and files will be automatically sent via Telegram
+CLAUDE_MD
+chown claude:claude /home/claude/CLAUDE.md
+chmod 0644 /home/claude/CLAUDE.md
 cat << 'UNIT_FILE' | sudo tee /etc/systemd/system/cloudcode-daemon.service > /dev/null
 {unit}
 UNIT_FILE
@@ -555,9 +603,10 @@ cat << 'SETTINGS_JSON' > /home/claude/.claude/settings.json"#;
 
     #[test]
     fn install_script_settings_json_has_correct_keys() {
-        let expanded = r#"{"permissions":{"allow":[],"deny":[]},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}"#;
+        let expanded = r#"{"permissions":{"allow":[],"deny":[]},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true,"mcpServers":{"playwright":{"command":"npx","args":["@anthropic-ai/mcp-server-playwright"]}}}"#;
         let parsed: serde_json::Value = serde_json::from_str(expanded).unwrap();
         assert_eq!(parsed["hasCompletedOnboarding"], true);
         assert_eq!(parsed["skipDangerousModePermissionPrompt"], true);
+        assert!(parsed["mcpServers"]["playwright"]["command"].as_str() == Some("npx"));
     }
 }

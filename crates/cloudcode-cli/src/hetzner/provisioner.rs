@@ -21,12 +21,41 @@ packages:
   - curl
   - jq
   - git
+  - nodejs
+  - npm
 
 write_files:
-  - path: /home/claude/.claude/settings.json
-    permissions: '0600'
+  - path: /opt/cloudcode-playwright-setup.sh
+    permissions: '0755'
     content: |
-      {{"permissions":{{"allow":[],"deny":[]}},"hasCompletedOnboarding":true,"skipDangerousModePermissionPrompt":true}}
+      #!/bin/bash
+      exec > /var/log/cloudcode-playwright.log 2>&1
+      set -euo pipefail
+
+      STATUS_FILE=/home/claude/.cloudcode/playwright-status.json
+
+      mkdir -p /home/claude/.cloudcode
+      chown -R claude:claude /home/claude/.cloudcode
+
+      echo '{{"status":"installing"}}' > "$STATUS_FILE"
+      chown claude:claude "$STATUS_FILE"
+      chmod 0600 "$STATUS_FILE"
+
+      for attempt in 1 2 3; do
+        echo "Playwright install attempt $attempt..."
+        if timeout 20m su - claude -c 'export PATH="$HOME/.local/bin:$PATH" && npx playwright install --with-deps chromium'; then
+          echo '{{"status":"ready"}}' > "$STATUS_FILE"
+          chown claude:claude "$STATUS_FILE"
+          chmod 0600 "$STATUS_FILE"
+          exit 0
+        fi
+        echo "Playwright attempt $attempt failed, waiting 15s..."
+        sleep 15
+      done
+
+      echo '{{"status":"failed","error":"Playwright browser install failed after 3 attempts. Check /var/log/cloudcode-playwright.log"}}' > "$STATUS_FILE"
+      chown claude:claude "$STATUS_FILE"
+      chmod 0600 "$STATUS_FILE"
   - path: /opt/cloudcode-setup.sh
     permissions: '0755'
     content: |
@@ -73,6 +102,14 @@ write_files:
       # Write success marker
       echo '{{"status":"ready"}}' > /home/claude/.cloudcode-status.json
       chown claude:claude /home/claude/.cloudcode-status.json
+      mkdir -p /home/claude/.cloudcode
+      chown -R claude:claude /home/claude/.cloudcode
+      echo '{{"status":"pending"}}' > /home/claude/.cloudcode/playwright-status.json
+      chown claude:claude /home/claude/.cloudcode/playwright-status.json
+      chmod 0600 /home/claude/.cloudcode/playwright-status.json
+
+      # Browser automation is non-blocking for first-use readiness. Install it in the background.
+      nohup /opt/cloudcode-playwright-setup.sh >/dev/null 2>&1 &
 
       echo "=== cloudcode setup completed at $(date) ==="
 
@@ -99,25 +136,6 @@ mod tests {
             api_key: Some("sk-test".to_string()),
             oauth_token: None,
         }
-    }
-
-    #[test]
-    fn cloud_init_contains_settings_json_write_file() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
-        assert!(output.contains("/home/claude/.claude/settings.json"));
-        assert!(output.contains("hasCompletedOnboarding"));
-        assert!(output.contains("skipDangerousModePermissionPrompt"));
-    }
-
-    #[test]
-    fn cloud_init_settings_json_before_setup_script() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
-        let settings_pos = output.find("settings.json").unwrap();
-        let setup_pos = output.find("cloudcode-setup.sh").unwrap();
-        assert!(
-            settings_pos < setup_pos,
-            "settings.json write_files entry should come before setup script"
-        );
     }
 
     #[test]
@@ -150,27 +168,9 @@ mod tests {
         assert!(output.contains("- tmux"));
         assert!(output.contains("- curl"));
         assert!(output.contains("- git"));
-    }
-
-    #[test]
-    fn cloud_init_settings_json_is_valid_json_after_format_expansion() {
-        // In the cloud-init template, {{ becomes { after Rust format!()
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
-        // Extract the settings.json content line
-        let lines: Vec<&str> = output.lines().collect();
-        let settings_line = lines
-            .iter()
-            .find(|l| l.contains("hasCompletedOnboarding"))
-            .expect("settings.json content not found");
-        let trimmed = settings_line.trim();
-        // Verify it parses as valid JSON
-        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|e| {
-            panic!("settings.json content is not valid JSON: {e}\nContent: {trimmed}")
-        });
-        assert_eq!(parsed["hasCompletedOnboarding"], true);
-        assert_eq!(parsed["skipDangerousModePermissionPrompt"], true);
-        assert!(parsed["permissions"]["allow"].is_array());
-        assert!(parsed["permissions"]["deny"].is_array());
+        assert!(output.contains("- nodejs"));
+        assert!(output.contains("- npm"));
+        assert!(output.contains("/opt/cloudcode-playwright-setup.sh"));
     }
 
     #[test]

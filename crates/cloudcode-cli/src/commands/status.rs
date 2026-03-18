@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::hetzner::client::{HetznerClient, estimate_monthly_cost};
-use crate::ssh::health::{self, CloudInitStatus};
+use crate::ssh::health::{self, BrowserAutomationStatus, CloudInitStatus};
 use crate::ssh::tunnel::DaemonClient;
 use crate::state::{VpsState, VpsStatus};
 
@@ -106,6 +106,38 @@ pub async fn run() -> Result<()> {
                     format!("{e}").dimmed()
                 );
             }
+        }
+    }
+
+    println!();
+    match health::browser_automation_status(&state).await {
+        Ok(BrowserAutomationStatus::Ready) => {
+            println!("  {:<12} {}", "Browser:".bold(), "ready".green());
+        }
+        Ok(BrowserAutomationStatus::Installing) => {
+            println!(
+                "  {:<12} {}",
+                "Browser:".bold(),
+                "installing Playwright in background".yellow()
+            );
+        }
+        Ok(BrowserAutomationStatus::Pending) => {
+            println!(
+                "  {:<12} {}",
+                "Browser:".bold(),
+                "queued for background setup".yellow()
+            );
+        }
+        Ok(BrowserAutomationStatus::Failed { error }) => {
+            println!(
+                "  {:<12} {} ({})",
+                "Browser:".bold(),
+                "failed".red(),
+                error.dimmed()
+            );
+        }
+        Ok(BrowserAutomationStatus::Unknown) | Err(_) => {
+            println!("  {:<12} {}", "Browser:".bold(), "unknown".dimmed());
         }
     }
 

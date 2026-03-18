@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use session::manager::SessionManager;
+use telegram::question_poller;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -47,11 +48,29 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Create shared question states for automatic question forwarding
+    let question_states = question_poller::new_question_states();
+
     if let Some(ref tg_config) = config.telegram {
         let mgr = Arc::clone(&session_mgr);
         let tg = tg_config.clone();
+        let states = question_states.clone();
+
+        // Create bot and clone for poller before passing to dispatcher
+        let bot = teloxide::Bot::new(&tg.bot_token);
+        let poller_bot = bot.clone();
+        let poller_mgr = Arc::clone(&session_mgr);
+        let poller_states = question_states.clone();
+        let owner_id = teloxide::types::ChatId(tg.owner_id);
+
+        // Spawn question poller
         tokio::spawn(async move {
-            telegram::bot::run(&tg, mgr).await;
+            question_poller::run_poller(poller_mgr, poller_bot, owner_id, poller_states).await;
+        });
+
+        // Run telegram bot (pass bot instance and question states)
+        tokio::spawn(async move {
+            telegram::bot::run_with_bot(bot, &tg, mgr, states).await;
         });
     }
 

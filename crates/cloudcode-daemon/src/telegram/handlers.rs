@@ -1,19 +1,39 @@
 use std::sync::Arc;
+
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{ChatAction, ParseMode};
 
 use super::bot::BotState;
-use super::formatter;
+use super::files::send_result_files;
+use super::replies::{send_markdownish, send_preformatted, send_text};
+use super::session_resolution::{
+    FreeTextSessionTarget, ReplyTarget, clear_waiting_state, resolve_command_session,
+    resolve_free_text_session, resolve_reply_target, resolve_type_target, session_exists,
+    waiting_sessions,
+};
+
+const HELP_TEXT: &str = "🤖 *cloudcode Telegram Bot*\n\n\
+    /spawn \\[name\\] — Create a new session\n\
+    /list — List active sessions\n\
+    /kill \\<name\\> — Kill a session\n\
+    /use \\<name\\> — Set default session\n\
+    /waiting — List sessions waiting for input\n\
+    /reply \\[session\\] \\<text\\> — Reply to a waiting session\n\
+    /context \\[session\\] — View session context\n\
+    /peek \\[session\\] — View raw tmux pane\n\
+    /type \\[session\\] \\<text\\> — Type into tmux session\n\
+    /status — Show daemon status\n\n\
+    Waiting prompts are routed with /reply, not ordinary chat text\\.\n\
+    Send any text to interact with the default session\\.";
 
 pub async fn handle_message(bot: Bot, msg: Message, state: Arc<BotState>) -> ResponseResult<()> {
-    // Owner-only filter
     if msg.chat.id != state.owner_id {
         bot.send_message(msg.chat.id, "⛔ Unauthorized.").await?;
         return Ok(());
     }
 
     let text = match msg.text() {
-        Some(t) => t.to_string(),
+        Some(text) => text.to_string(),
         None => return Ok(()),
     };
 
@@ -32,188 +52,20 @@ async fn handle_command(
 ) -> ResponseResult<()> {
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
     let command = parts[0].to_lowercase();
-    let args = parts.get(1).map(|s| s.trim()).unwrap_or("");
+    let args = parts.get(1).map(|value| value.trim()).unwrap_or("");
 
     match command.as_str() {
-        "/start" | "/help" => {
-            let help_text = "🤖 *cloudcode Telegram Bot*\n\n\
-                /spawn \\[name\\] — Create a new session\n\
-                /list — List active sessions\n\
-                /kill \\<name\\> — Kill a session\n\
-                /use \\<name\\> — Set default session\n\
-                /status — Show daemon status\n\n\
-                Send any text to interact with the default session\\.";
-            bot.send_message(msg.chat.id, help_text)
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-
-            // Auto-list existing sessions on /start
-            if let Ok(sessions) = state.session_mgr.list().await {
-                if !sessions.is_empty() {
-                    let default = state.default_session.current();
-                    let mut session_list = String::from("📋 Existing sessions:\n");
-                    for s in &sessions {
-                        let marker = if default.as_deref() == Some(&s.name) {
-                            " ← default"
-                        } else {
-                            ""
-                        };
-                        session_list.push_str(&format!("• {}{}\n", s.name, marker));
-                    }
-                    session_list.push_str("\nUse /use <name> to set a default session.");
-                    bot.send_message(msg.chat.id, session_list).await?;
-                }
-            }
-        }
-        "/spawn" => {
-            let name = if args.is_empty() {
-                None
-            } else {
-                Some(args.to_string())
-            };
-            match state.session_mgr.spawn(name).await {
-                Ok(session) => {
-                    // Always set newly spawned session as default
-                    if let Err(err) = state.default_session.set(Some(session.name.clone())) {
-                        bot.send_message(
-                            msg.chat.id,
-                            format!(
-                                "⚠️ Session '{}' created, but failed to persist default session: {}",
-                                session.name, err
-                            ),
-                        )
-                        .await?;
-                    }
-                    bot.send_message(
-                        msg.chat.id,
-                        format!("✅ Session '{}' created and set as default. Send any message to start chatting.", session.name),
-                    )
-                    .await?;
-                }
-                Err(e) => {
-                    let err_str = format!("{}", e);
-                    if err_str.contains("auth")
-                        || err_str.contains("login")
-                        || err_str.contains("OAuth")
-                    {
-                        bot.send_message(
-                            msg.chat.id,
-                            "❌ OAuth login has not been completed on the VPS.\n\n\
-                             Run `cloudcode open <session>` from your terminal to complete the login flow first.",
-                        )
-                        .await?;
-                    } else {
-                        bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-                    }
-                }
-            }
-        }
-        "/list" => match state.session_mgr.list().await {
-            Ok(sessions) => {
-                if sessions.is_empty() {
-                    bot.send_message(msg.chat.id, "No active sessions.").await?;
-                } else {
-                    let default = state.default_session.current();
-                    let mut text = String::from("📋 Active sessions:\n");
-                    for s in &sessions {
-                        let marker = if default.as_deref() == Some(&s.name) {
-                            " ← default"
-                        } else {
-                            ""
-                        };
-                        text.push_str(&format!(
-                            "• {} [{}]{}\n",
-                            s.name,
-                            format!("{:?}", s.state),
-                            marker
-                        ));
-                    }
-                    bot.send_message(msg.chat.id, text).await?;
-                }
-            }
-            Err(e) => {
-                bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-            }
-        },
-        "/kill" => {
-            if args.is_empty() {
-                bot.send_message(msg.chat.id, "Usage: /kill <session-name>")
-                    .await?;
-            } else {
-                match state.session_mgr.kill(args).await {
-                    Ok(()) => {
-                        // Clear default if this was the default session
-                        if state.default_session.current().as_deref() == Some(args) {
-                            if let Err(err) = state.default_session.clear() {
-                                bot.send_message(
-                                    msg.chat.id,
-                                    format!(
-                                        "⚠️ Session '{}' killed, but failed to clear persisted default session: {}",
-                                        args, err
-                                    ),
-                                )
-                                .await?;
-                            }
-                        }
-                        bot.send_message(msg.chat.id, format!("✅ Session '{}' killed.", args))
-                            .await?;
-                    }
-                    Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-                    }
-                }
-            }
-        }
-        "/use" => {
-            if args.is_empty() {
-                bot.send_message(msg.chat.id, "Usage: /use <session-name>")
-                    .await?;
-            } else {
-                // Verify session exists
-                match state.session_mgr.list().await {
-                    Ok(sessions) => {
-                        if sessions.iter().any(|s| s.name == args) {
-                            if let Err(err) = state.default_session.set(Some(args.to_string())) {
-                                bot.send_message(
-                                    msg.chat.id,
-                                    format!(
-                                        "⚠️ Default session updated in memory, but failed to persist: {}",
-                                        err
-                                    ),
-                                )
-                                .await?;
-                            }
-                            bot.send_message(
-                                msg.chat.id,
-                                format!("✅ Default session set to '{}'.", args),
-                            )
-                            .await?;
-                        } else {
-                            bot.send_message(
-                                msg.chat.id,
-                                format!("❌ Session '{}' not found.", args),
-                            )
-                            .await?;
-                        }
-                    }
-                    Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-                    }
-                }
-            }
-        }
-        "/status" => match state.session_mgr.list().await {
-            Ok(sessions) => {
-                let text = format!(
-                    "📊 Status:\n• Sessions: {}\n• Daemon: running",
-                    sessions.len()
-                );
-                bot.send_message(msg.chat.id, text).await?;
-            }
-            Err(e) => {
-                bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-            }
-        },
+        "/start" | "/help" => handle_help(bot, msg, state).await?,
+        "/spawn" => handle_spawn(bot, msg, state, args).await?,
+        "/list" => handle_list(bot, msg, state).await?,
+        "/kill" => handle_kill(bot, msg, state, args).await?,
+        "/use" => handle_use(bot, msg, state, args).await?,
+        "/status" => handle_status(bot, msg, state).await?,
+        "/waiting" => handle_waiting(bot, msg, state).await?,
+        "/reply" => handle_reply(bot, msg, state, args).await?,
+        "/context" => handle_context(bot, msg, state, args).await?,
+        "/peek" => handle_peek(bot, msg, state, args).await?,
+        "/type" => handle_type(bot, msg, state, args).await?,
         _ => {
             bot.send_message(
                 msg.chat.id,
@@ -226,83 +78,455 @@ async fn handle_command(
     Ok(())
 }
 
+async fn handle_help(bot: &Bot, msg: &Message, state: &Arc<BotState>) -> ResponseResult<()> {
+    bot.send_message(msg.chat.id, HELP_TEXT)
+        .parse_mode(ParseMode::MarkdownV2)
+        .await?;
+
+    if let Ok(sessions) = state.session_mgr.list().await {
+        if !sessions.is_empty() {
+            let default = state.default_session.current();
+            let mut session_list = String::from("📋 Existing sessions:\n");
+            for session in &sessions {
+                let marker = if default.as_deref() == Some(&session.name) {
+                    " ← default"
+                } else {
+                    ""
+                };
+                session_list.push_str(&format!("• {}{}\n", session.name, marker));
+            }
+            session_list.push_str("\nUse /use <name> to set a default session.");
+            bot.send_message(msg.chat.id, session_list).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_spawn(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    let name = if args.is_empty() {
+        None
+    } else {
+        Some(args.to_string())
+    };
+
+    match state.session_mgr.spawn(name).await {
+        Ok(session) => {
+            if let Err(err) = state.default_session.set(Some(session.name.clone())) {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "⚠️ Session '{}' created, but failed to persist default session: {}",
+                        session.name, err
+                    ),
+                )
+                .await?;
+            }
+
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "✅ Session '{}' created and set as default. Send any message to start chatting.",
+                    session.name
+                ),
+            )
+            .await?;
+        }
+        Err(err) => {
+            if is_oauth_error(&err) {
+                bot.send_message(
+                    msg.chat.id,
+                    "❌ OAuth login has not been completed on the VPS.\n\n\
+                     Run `cloudcode open <session>` from your terminal to complete the login flow first.",
+                )
+                .await?;
+            } else {
+                bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_list(bot: &Bot, msg: &Message, state: &Arc<BotState>) -> ResponseResult<()> {
+    match state.session_mgr.list().await {
+        Ok(sessions) => {
+            if sessions.is_empty() {
+                bot.send_message(msg.chat.id, "No active sessions.").await?;
+            } else {
+                let default = state.default_session.current();
+                let mut text = String::from("📋 Active sessions:\n");
+                for session in &sessions {
+                    let marker = if default.as_deref() == Some(&session.name) {
+                        " ← default"
+                    } else {
+                        ""
+                    };
+                    text.push_str(&format!(
+                        "• {} [{}]{}\n",
+                        session.name,
+                        format!("{:?}", session.state),
+                        marker
+                    ));
+                }
+                bot.send_message(msg.chat.id, text).await?;
+            }
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_kill(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    if args.is_empty() {
+        bot.send_message(msg.chat.id, "Usage: /kill <session-name>")
+            .await?;
+        return Ok(());
+    }
+
+    match state.session_mgr.kill(args).await {
+        Ok(()) => {
+            if state.default_session.current().as_deref() == Some(args) {
+                if let Err(err) = state.default_session.clear() {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "⚠️ Session '{}' killed, but failed to clear persisted default session: {}",
+                            args, err
+                        ),
+                    )
+                    .await?;
+                }
+            }
+
+            bot.send_message(msg.chat.id, format!("✅ Session '{}' killed.", args))
+                .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_use(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    if args.is_empty() {
+        bot.send_message(msg.chat.id, "Usage: /use <session-name>")
+            .await?;
+        return Ok(());
+    }
+
+    match session_exists(state, args).await {
+        Ok(true) => {
+            if let Err(err) = state.default_session.set(Some(args.to_string())) {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "⚠️ Default session updated in memory, but failed to persist: {}",
+                        err
+                    ),
+                )
+                .await?;
+            }
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Default session set to '{}'.", args),
+            )
+            .await?;
+        }
+        Ok(false) => {
+            bot.send_message(msg.chat.id, format!("❌ Session '{}' not found.", args))
+                .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_status(bot: &Bot, msg: &Message, state: &Arc<BotState>) -> ResponseResult<()> {
+    match state.session_mgr.list().await {
+        Ok(sessions) => {
+            let text = format!(
+                "📊 Status:\n• Sessions: {}\n• Daemon: running",
+                sessions.len()
+            );
+            bot.send_message(msg.chat.id, text).await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_waiting(bot: &Bot, msg: &Message, state: &Arc<BotState>) -> ResponseResult<()> {
+    let waiting = waiting_sessions(state);
+    if waiting.is_empty() {
+        bot.send_message(msg.chat.id, "No sessions are waiting for input.")
+            .await?;
+        return Ok(());
+    }
+
+    let mut text = String::from("⏳ Waiting sessions:\n");
+    for (name, question) in waiting {
+        let summary = question.lines().last().unwrap_or("").trim();
+        text.push_str(&format!("• {} — {}\n", name, summary));
+    }
+    text.push_str("\nUse /reply <session> <text> to answer.");
+    bot.send_message(msg.chat.id, text).await?;
+    Ok(())
+}
+
+async fn handle_reply(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    if args.is_empty() {
+        bot.send_message(msg.chat.id, "Usage: /reply [session] <text>")
+            .await?;
+        return Ok(());
+    }
+
+    match resolve_reply_target(state, args).await {
+        Ok(ReplyTarget::NoneWaiting) => {
+            bot.send_message(msg.chat.id, "No sessions are currently waiting for input.")
+                .await?;
+        }
+        Ok(ReplyTarget::Ready {
+            session_name,
+            reply_text,
+        }) => match state
+            .session_mgr
+            .send_keys(&session_name, &reply_text)
+            .await
+        {
+            Ok(()) => {
+                clear_waiting_state(state, &session_name);
+                bot.send_message(msg.chat.id, format!("✅ Replied to '{}'.", session_name))
+                    .await?;
+            }
+            Err(err) => {
+                bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+            }
+        },
+        Ok(ReplyTarget::Ambiguous(waiting)) => {
+            let mut text =
+                String::from("Multiple sessions are waiting. Use /reply <session> <text>.\n");
+            for (name, question) in waiting {
+                let summary = question.lines().last().unwrap_or("").trim();
+                text.push_str(&format!("• {} — {}\n", name, summary));
+            }
+            bot.send_message(msg.chat.id, text).await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_context(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    let explicit = (!args.is_empty()).then_some(args);
+    match resolve_command_session(state, explicit).await {
+        Ok(Some(name)) => {
+            let context_path = format!("/home/claude/.cloudcode/contexts/context_{}.md", name);
+            match tokio::fs::read_to_string(&context_path).await {
+                Ok(content) if content.trim().is_empty() => {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("Context file for '{}' is empty.", name),
+                    )
+                    .await?;
+                }
+                Ok(content) => {
+                    send_markdownish(bot, msg.chat.id, &content).await?;
+                }
+                Err(_) => {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("No context file for session '{}' yet.", name),
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(None) => {
+            bot.send_message(
+                msg.chat.id,
+                "No default session. Use /context <session> or /use <session> first.",
+            )
+            .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_peek(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    let explicit = (!args.is_empty()).then_some(args);
+    match resolve_command_session(state, explicit).await {
+        Ok(Some(name)) => match state.session_mgr.capture_pane(&name).await {
+            Ok(content) if content.trim().is_empty() => {
+                bot.send_message(msg.chat.id, "(pane is empty)").await?;
+            }
+            Ok(content) => {
+                send_preformatted(bot, msg.chat.id, &content).await?;
+            }
+            Err(err) => {
+                bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+            }
+        },
+        Ok(None) => {
+            bot.send_message(
+                msg.chat.id,
+                "No default session. Use /peek <session> or /use <session> first.",
+            )
+            .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_type(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    if args.is_empty() {
+        bot.send_message(msg.chat.id, "Usage: /type [session] <text>")
+            .await?;
+        return Ok(());
+    }
+
+    match resolve_type_target(state, args).await {
+        Ok(Some((name, text_to_type))) => {
+            match state.session_mgr.send_keys(&name, &text_to_type).await {
+                Ok(()) => {
+                    clear_waiting_state(state, &name);
+                    bot.send_message(msg.chat.id, format!("✅ Typed into '{}'.", name))
+                        .await?;
+                }
+                Err(err) => {
+                    bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+                }
+            }
+        }
+        Ok(None) => {
+            bot.send_message(
+                msg.chat.id,
+                "No default session. Use /type <session> <text> or /use <session> first.",
+            )
+            .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_free_text(
     bot: &Bot,
     msg: &Message,
     state: &Arc<BotState>,
     text: &str,
 ) -> ResponseResult<()> {
-    let session_name = match state.default_session.current() {
-        Some(name) => match state.session_mgr.list().await {
-            Ok(sessions) if sessions.iter().any(|s| s.name == name) => Some(name),
-            Ok(_) => {
-                if let Err(err) = state.default_session.clear() {
-                    log::warn!(
-                        "Failed to clear stale persisted Telegram default session: {}",
-                        err
-                    );
-                }
-                None
-            }
-            Err(_) => Some(name),
-        },
-        None => None,
-    };
-    let session_name = match session_name {
-        Some(name) => name,
-        None => {
-            // No default set — try to auto-resolve
-            match state.session_mgr.list().await {
-                Ok(sessions) if sessions.len() == 1 => {
-                    // Exactly one session: auto-set it as default and proceed
-                    let name = sessions[0].name.clone();
-                    if let Err(err) = state.default_session.set(Some(name.clone())) {
-                        bot.send_message(
-                            msg.chat.id,
-                            format!(
-                                "⚠️ Auto-selected session '{}', but failed to persist default session: {}",
-                                name, err
-                            ),
-                        )
-                        .await?;
-                    }
-                    bot.send_message(msg.chat.id, format!("📌 Auto-selected session '{}'.", name))
-                        .await?;
-                    name
-                }
-                Ok(sessions) if sessions.is_empty() => {
+    let session_name = match resolve_free_text_session(state).await {
+        Ok(FreeTextSessionTarget::Selected {
+            name,
+            auto_selected,
+        }) => {
+            if auto_selected {
+                if let Err(err) = state.default_session.set(Some(name.clone())) {
                     bot.send_message(
                         msg.chat.id,
-                        "No sessions available. Use /spawn to create one.",
+                        format!(
+                            "⚠️ Auto-selected session '{}', but failed to persist default session: {}",
+                            name, err
+                        ),
                     )
                     .await?;
-                    return Ok(());
                 }
-                Ok(sessions) => {
-                    // Multiple sessions — list them for the user
-                    let mut list = String::from("No default session set. Available sessions:\n");
-                    for s in &sessions {
-                        list.push_str(&format!("• {}\n", s.name));
-                    }
-                    list.push_str("\nUse /use <name> to pick one.");
-                    bot.send_message(msg.chat.id, list).await?;
-                    return Ok(());
-                }
-                Err(e) => {
-                    bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
-                    return Ok(());
-                }
+                bot.send_message(msg.chat.id, format!("📌 Auto-selected session '{}'.", name))
+                    .await?;
             }
+            name
+        }
+        Ok(FreeTextSessionTarget::NoSessions) => {
+            bot.send_message(
+                msg.chat.id,
+                "No sessions available. Use /spawn to create one.",
+            )
+            .await?;
+            return Ok(());
+        }
+        Ok(FreeTextSessionTarget::MultipleSessions(sessions)) => {
+            let mut list = String::from("No default session set. Available sessions:\n");
+            for session in sessions {
+                list.push_str(&format!("• {}\n", session));
+            }
+            list.push_str("\nUse /use <name> to pick one.");
+            bot.send_message(msg.chat.id, list).await?;
+            return Ok(());
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
+            return Ok(());
         }
     };
 
-    // Send periodic typing indicators (every 4 seconds) until send completes
     let typing_bot = bot.clone();
     let typing_chat_id = msg.chat.id;
     let typing_handle = tokio::spawn(async move {
         loop {
             let _ = typing_bot
-                .send_chat_action(typing_chat_id, teloxide::types::ChatAction::Typing)
+                .send_chat_action(typing_chat_id, ChatAction::Typing)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
@@ -313,50 +537,13 @@ async fn handle_free_text(
 
     match send_result {
         Ok(result) => {
-            // Send text response
-            if !result.text.is_empty() {
-                let chunks = formatter::chunk_message(&result.text, 4096);
-                for chunk in chunks {
-                    if !chunk.trim().is_empty() {
-                        bot.send_message(msg.chat.id, chunk).await?;
-                    }
-                }
-            }
-
-            // Send any files that were created
-            for file_path in &result.files {
-                let path = std::path::Path::new(file_path);
-                if !path.exists() {
-                    continue;
-                }
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-
-                let file = teloxide::types::InputFile::file(path);
-                if matches!(
-                    ext.to_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "webp"
-                ) {
-                    // Send images as photos
-                    bot.send_photo(msg.chat.id, file).caption(filename).await?;
-                } else {
-                    // Send everything else as documents
-                    bot.send_document(msg.chat.id, file)
-                        .caption(filename)
-                        .await?;
-                }
-            }
+            send_markdownish(bot, msg.chat.id, &result.text).await?;
+            send_result_files(bot, msg.chat.id, &result.files).await?;
         }
-        Err(e) => {
-            let err_str = format!("{}", e);
-            if err_str.contains("auth")
-                || err_str.contains("login")
-                || err_str.contains("OAuth")
-                || err_str.contains("unauthorized")
-                || err_str.contains("credentials")
-                || err_str.contains("401")
-            {
-                bot.send_message(
+        Err(err) => {
+            if is_oauth_error(&err) {
+                send_text(
+                    bot,
                     msg.chat.id,
                     "❌ OAuth login has not been completed on the VPS.\n\n\
                      To fix this, run from your terminal:\n\
@@ -367,10 +554,20 @@ async fn handle_free_text(
                 )
                 .await?;
             } else {
-                bot.send_message(msg.chat.id, format!("❌ {}", e)).await?;
+                bot.send_message(msg.chat.id, format!("❌ {}", err)).await?;
             }
         }
     }
 
     Ok(())
+}
+
+fn is_oauth_error(err: &anyhow::Error) -> bool {
+    let err_str = err.to_string();
+    err_str.contains("auth")
+        || err_str.contains("login")
+        || err_str.contains("OAuth")
+        || err_str.contains("unauthorized")
+        || err_str.contains("credentials")
+        || err_str.contains("401")
 }

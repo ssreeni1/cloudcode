@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use cloudcode_common::session::{SessionInfo, SessionState};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,18 +13,50 @@ pub struct SendOutput {
     pub files: Vec<PathBuf>,
 }
 
-/// Snapshot files in watched directories (non-recursive, just top-level).
-fn snapshot_files(dirs: &[PathBuf]) -> HashSet<PathBuf> {
-    let mut files = HashSet::new();
-    for dir in dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    files.insert(path);
+/// Directories to skip during recursive file scanning (heavy/irrelevant dirs).
+const SCAN_EXCLUDE_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "__pycache__",
+    "target",
+    ".venv",
+    "venv",
+];
+
+/// Recursively walk a directory up to a depth limit, collecting files.
+fn walk_dir(dir: &Path, depth: usize, files: &mut HashMap<PathBuf, (SystemTime, u64)>) {
+    if depth == 0 {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip known heavy directories
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if SCAN_EXCLUDE_DIRS.contains(&name) {
+                    continue;
                 }
             }
+            walk_dir(&path, depth - 1, files);
+        } else if path.is_file() {
+            if let Ok(meta) = path.metadata() {
+                let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
+                let size = meta.len();
+                files.insert(path, (mtime, size));
+            }
         }
+    }
+}
+
+/// Snapshot files in watched directories (recursive, depth limit 5).
+fn snapshot_files(dirs: &[PathBuf]) -> HashMap<PathBuf, (SystemTime, u64)> {
+    let mut files = HashMap::new();
+    for dir in dirs {
+        walk_dir(dir, 5, &mut files);
     }
     files
 }
@@ -144,13 +176,16 @@ async fn session_runtime_workdir(session: &str) -> Result<PathBuf> {
     Ok(workspace)
 }
 
-fn session_snapshot_dirs_from_workdir(workdir: &Path) -> Vec<PathBuf> {
-    vec![
+fn session_snapshot_dirs_from_workdir(workdir: &Path, session_tmp: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = vec![
         workdir.to_path_buf(),
         workdir.join("screenshots"),
         workdir.join("output"),
-        PathBuf::from("/tmp"),
-    ]
+    ];
+    if let Some(tmp) = session_tmp {
+        dirs.push(tmp.to_path_buf());
+    }
+    dirs
 }
 
 pub struct SessionManager {
@@ -209,6 +244,46 @@ impl SessionManager {
             "exec {} --dangerously-skip-permissions --permission-mode bypassPermissions",
             claude_bin
         );
+        // Create session-scoped temp dir
+        let session_tmp = daemon_home_dir()
+            .join(".cloudcode")
+            .join("sessions")
+            .join(&name)
+            .join("tmp");
+        std::fs::create_dir_all(&session_tmp).with_context(|| {
+            format!("Failed to create session tmp dir {}", session_tmp.display())
+        })?;
+
+        // Create CLAUDE.md symlink in workspace if not already present
+        let workspace_claude_md = workspace.join("CLAUDE.md");
+        let global_claude_md = daemon_home_dir().join("CLAUDE.md");
+        if global_claude_md.exists() && !workspace_claude_md.exists() {
+            #[cfg(unix)]
+            {
+                let _ = std::os::unix::fs::symlink(&global_claude_md, &workspace_claude_md);
+            }
+        }
+
+        // Archive stale context file if session name is being reused
+        let context_file = daemon_home_dir()
+            .join(".cloudcode")
+            .join("contexts")
+            .join(format!("context_{}.md", name));
+        if context_file.exists() {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let bak = context_file.with_extension(format!("{}.bak", ts));
+            let _ = std::fs::rename(&context_file, &bak);
+            log::info!(
+                "Archived stale context file for reused session '{}' to {:?}",
+                name,
+                bak
+            );
+        }
+
+        let tmpdir_env = format!("TMPDIR={}", session_tmp.display());
         let status = Command::new("tmux")
             .args([
                 "new-session",
@@ -223,6 +298,10 @@ impl SessionManager {
                 &workspace_arg,
                 "-e",
                 &home_env,
+                "-e",
+                &format!("CLOUDCODE_SESSION_NAME={}", name),
+                "-e",
+                &tmpdir_env,
                 "sh",
                 "-lc",
                 &shell_cmd,
@@ -327,8 +406,18 @@ impl SessionManager {
         let claude_bin = format!("{}/.local/bin/claude", home);
         let workdir = session_runtime_workdir(session).await?;
 
+        // Session-scoped temp dir for file detection
+        let session_tmp = daemon_home_dir()
+            .join(".cloudcode")
+            .join("sessions")
+            .join(session)
+            .join("tmp");
+        std::fs::create_dir_all(&session_tmp).with_context(|| {
+            format!("Failed to create session tmp dir {}", session_tmp.display())
+        })?;
+
         // Snapshot existing files before running claude
-        let watch_dirs = session_snapshot_dirs_from_workdir(&workdir);
+        let watch_dirs = session_snapshot_dirs_from_workdir(&workdir, Some(&session_tmp));
         let files_before = snapshot_files(&watch_dirs);
 
         // Use claude -p (print mode) for clean text output.
@@ -339,6 +428,8 @@ impl SessionManager {
                 "--continue",
                 message,
             ])
+            .env("CLOUDCODE_SESSION_NAME", session)
+            .env("TMPDIR", &session_tmp)
             .current_dir(&workdir)
             .output()
             .await
@@ -351,18 +442,101 @@ impl SessionManager {
 
         let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        // Find new files created during execution
+        // Find new or modified files
         let files_after = snapshot_files(&watch_dirs);
         let new_files: Vec<PathBuf> = files_after
             .into_iter()
-            .filter(|f| !files_before.contains(f))
+            .filter(|(path, (mtime, size))| {
+                match files_before.get(path) {
+                    None => true,                                                          // new file
+                    Some((old_mtime, old_size)) => mtime != old_mtime || size != old_size, // modified
+                }
+            })
+            .map(|(path, _)| path)
             .filter(|f| is_sendable_file(f))
             .collect();
+
+        if !new_files.is_empty() {
+            log::info!(
+                "Session '{}': detected {} new/modified file(s): {:?}",
+                session,
+                new_files.len(),
+                new_files
+            );
+        }
 
         Ok(SendOutput {
             text: response,
             files: new_files,
         })
+    }
+
+    /// Capture the current tmux pane content for a session.
+    pub async fn capture_pane(&self, session: &str) -> Result<String> {
+        validate_session_name(session)?;
+        if !self.session_exists(session).await {
+            bail!("Session '{}' does not exist", session);
+        }
+
+        let output = Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-50", "-t", session])
+            .output()
+            .await
+            .context("Failed to capture tmux pane")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux capture-pane failed: {}", stderr);
+        }
+
+        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        // Strip ANSI escape codes
+        let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
+        let clean = ansi_re.replace_all(&raw, "").to_string();
+        Ok(clean)
+    }
+
+    /// Send keystrokes to a tmux session (literal text + Enter).
+    pub async fn send_keys(&self, session: &str, text: &str) -> Result<()> {
+        validate_session_name(session)?;
+        if !self.session_exists(session).await {
+            bail!("Session '{}' does not exist", session);
+        }
+
+        // Validate input
+        if text.len() > 4096 {
+            bail!("Input too long ({} chars, max 4096)", text.len());
+        }
+        if text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            bail!("Input contains disallowed control characters");
+        }
+
+        // Send literal text
+        let status = Command::new("tmux")
+            .args(["send-keys", "-l", "-t", session, "--", text])
+            .status()
+            .await
+            .context("Failed to send keys to tmux session")?;
+
+        if !status.success() {
+            bail!("tmux send-keys failed");
+        }
+
+        // Send Enter
+        let status = Command::new("tmux")
+            .args(["send-keys", "-t", session, "Enter"])
+            .status()
+            .await
+            .context("Failed to send Enter to tmux session")?;
+
+        if !status.success() {
+            bail!("tmux send-keys Enter failed");
+        }
+
+        Ok(())
     }
 
     async fn session_exists(&self, name: &str) -> bool {
@@ -503,5 +677,39 @@ mod tests {
     fn test_snapshot_files_empty_list() {
         let result = snapshot_files(&[]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_scan_exclude_dirs_contains_expected() {
+        assert!(SCAN_EXCLUDE_DIRS.contains(&".git"));
+        assert!(SCAN_EXCLUDE_DIRS.contains(&"node_modules"));
+        assert!(SCAN_EXCLUDE_DIRS.contains(&"__pycache__"));
+        assert!(SCAN_EXCLUDE_DIRS.contains(&"target"));
+    }
+
+    #[test]
+    fn test_walk_dir_skips_excluded_dirs() {
+        // Create a temp dir with an excluded subdirectory
+        let tmp = std::env::temp_dir().join("cloudcode_test_walk_dir_exclude");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("node_modules")).unwrap();
+        std::fs::create_dir_all(tmp.join("output")).unwrap();
+        std::fs::write(tmp.join("node_modules").join("pkg.json"), "{}").unwrap();
+        std::fs::write(tmp.join("output").join("result.txt"), "ok").unwrap();
+        std::fs::write(tmp.join("top.txt"), "top").unwrap();
+
+        let mut files = HashMap::new();
+        walk_dir(&tmp, 3, &mut files);
+
+        // Should find top.txt and output/result.txt but NOT node_modules/pkg.json
+        let paths: Vec<String> = files
+            .keys()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert!(paths.contains(&"top.txt".to_string()));
+        assert!(paths.contains(&"result.txt".to_string()));
+        assert!(!paths.contains(&"pkg.json".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
