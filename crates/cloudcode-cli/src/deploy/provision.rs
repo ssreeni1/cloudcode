@@ -617,7 +617,7 @@ impl DeploymentContext {
                 );
                 self.state.status = Some(VpsStatus::Error);
                 self.state.save()?;
-                return Ok(());
+                anyhow::bail!("Cloud-init failed: {}", error);
             }
         }
         Ok(())
@@ -705,7 +705,7 @@ impl DeploymentContext {
                 println!("\n{}: {}", "Error".red().bold(), e);
                 self.state.status = Some(VpsStatus::Error);
                 self.state.save()?;
-                return Ok(());
+                anyhow::bail!("Failed to prepare daemon binary: {}", e);
             }
         }
         Ok(())
@@ -743,7 +743,7 @@ impl DeploymentContext {
                 println!("\n{}: {}", "Error".red().bold(), e);
                 self.state.status = Some(VpsStatus::Error);
                 self.state.save()?;
-                return Ok(());
+                anyhow::bail!("Failed to upload daemon binary: {}", e);
             }
         }
         Ok(())
@@ -776,7 +776,7 @@ impl DeploymentContext {
                 println!("\n{}: {}", "Error".red().bold(), e);
                 self.state.status = Some(VpsStatus::Error);
                 self.state.save()?;
-                return Ok(());
+                anyhow::bail!("Failed to install daemon service: {}", e);
             }
         }
         Ok(())

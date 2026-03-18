@@ -41,41 +41,40 @@ pub fn target_triple_for_server_type(server_type: &str) -> &'static str {
 }
 
 /// Get the daemon binary for a target.
-/// Tries in order: embedded binary → local cross-compilation → remote build on VPS.
-/// The `state` parameter is needed for the remote build fallback.
+/// Tries in order: embedded binary → remote build on VPS.
+/// If both fail, shows hint about installing cargo-zigbuild for faster future builds.
 pub fn get_daemon_binary(target: &str) -> Result<PathBuf> {
     // 1. Try embedded binary (release builds have these baked in)
     if let Some(path) = extract_embedded_daemon(target)? {
         return Ok(path);
     }
 
-    // 2. Try local cross-compilation with cargo-zigbuild
+    // 2. Fall back to remote build on the VPS
     eprintln!(
-        "  {} No embedded daemon binary found (dev build). Trying local cross-compilation...",
-        "→".to_string()
+        "  No embedded daemon binary (dev build). Building on VPS instead (3-5 min)..."
     );
-    match cross_compile_daemon(target) {
+    match remote_build_daemon(target) {
         Ok(path) => return Ok(path),
         Err(e) => {
-            eprintln!(
-                "  {} Cross-compilation unavailable: {}",
-                "→".to_string(),
-                e
-            );
-            eprintln!("  {} To enable fast local cross-compilation, run:", "→".to_string());
-            eprintln!("      brew install zig");
-            eprintln!("      cargo install cargo-zigbuild");
-            eprintln!("      rustup target add {target}");
-            eprintln!();
+            eprintln!("  Remote build failed: {}", e);
         }
     }
 
-    // 3. Fall back to remote build on the VPS (slowest, but always works)
-    eprintln!(
-        "  {} Falling back to building on the VPS (this will take 3-5 minutes)...",
-        "→".to_string()
-    );
-    remote_build_daemon(target)
+    // 3. Last resort: try local cross-compilation
+    eprintln!("  Trying local cross-compilation...");
+    match cross_compile_daemon(target) {
+        Ok(path) => return Ok(path),
+        Err(_) => {}
+    }
+
+    anyhow::bail!(
+        "Could not prepare daemon binary.\n\
+         \n  To speed up future runs, install local cross-compilation tools:\n\
+         \n      brew install zig\n\
+         \n      cargo install cargo-zigbuild\n\
+         \n      rustup target add {target}\n\
+         \n  Then run /up again."
+    )
 }
 
 /// Build the daemon on the VPS by uploading source and compiling remotely.
