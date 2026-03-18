@@ -55,8 +55,12 @@ impl DeploymentStage {
             Self::ProvisionServer => {
                 format!("Provisioning server ({server_type} in {location})...")
             }
-            Self::WaitForSsh => "Waiting for SSH connectivity...".to_string(),
-            Self::WaitForCloudInit => "Waiting for cloud-init to complete (usually 3-5 min)...".to_string(),
+            Self::WaitForSsh => {
+                "Waiting for SSH login readiness (cloud-init user setup)...".to_string()
+            }
+            Self::WaitForCloudInit => {
+                "Waiting for cloud-init to complete (usually 3-5 min)...".to_string()
+            }
             Self::VerifyInstallation => "Verifying installed software...".to_string(),
             Self::PrepareDaemonBinary => format!("Preparing daemon for {target}..."),
             Self::UploadDaemonBinary => "Uploading daemon binary to VPS...".to_string(),
@@ -591,7 +595,9 @@ impl DeploymentContext {
                     "The server may still be starting. Try /status or `cloudcode status` later."
                         .yellow()
                 );
-                anyhow::bail!("SSH connectivity timed out. The VPS is provisioned — run /up again to retry from this point.");
+                anyhow::bail!(
+                    "SSH connectivity timed out. The VPS is provisioned — run /up again to retry from this point."
+                );
             }
         }
         Ok(())

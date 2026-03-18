@@ -48,7 +48,7 @@ Before running cloudcode, you need:
 
 3. **Telegram bot** (optional) — create one via [@BotFather](https://t.me/BotFather) on Telegram. You'll need the bot token and your numeric user ID (get it from [@userinfobot](https://t.me/userinfobot)).
 
-4. **ssh** and **rsync** on your local machine (pre-installed on macOS and most Linux).
+4. **ssh** on your local machine (pre-installed on macOS and most Linux).
 
 ## Quick start
 
@@ -187,15 +187,15 @@ Your machine                         Hetzner VPS
 1. Generate cloud-init config
 2. Create SSH key in Hetzner
 3. Provision server (your chosen type and location)
-4. Wait for SSH connectivity
+4. Wait for SSH login readiness
 5. Wait for cloud-init (installs tmux, Claude Code)
 6. Verify installation
-7. Prepare daemon binary (extracted from embedded binary or cross-compiled)
+7. Prepare daemon binary (embedded in release builds, otherwise built on the VPS or cross-compiled locally)
 8. Upload daemon binary via scp
 9. Install daemon config + systemd service
 10. Verify daemon is running
 
-For release builds, the daemon binary is pre-compiled and embedded in the CLI binary — no compilation happens on the VPS. Provisioning takes ~3-5 minutes.
+For release builds, the daemon binary is pre-compiled and embedded in the CLI binary, so no daemon compilation happens on the VPS. Source-built installs can fall back to a packaged VPS build path if embedded binaries are unavailable.
 
 ## Security model
 

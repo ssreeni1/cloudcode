@@ -27,6 +27,17 @@ esac
 TARGET="${ARCH}-${OS}"
 echo "Detected platform: ${TARGET}"
 
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        echo "Neither shasum nor sha256sum is available for checksum verification." >&2
+        exit 1
+    fi
+}
+
 # Get latest release tag
 LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$LATEST" ]; then
@@ -37,6 +48,7 @@ echo "Latest release: ${LATEST}"
 
 # Download
 URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}-${TARGET}"
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS"
 echo "Downloading ${URL}..."
 
 TMP=$(mktemp)
@@ -46,6 +58,32 @@ if ! curl -fsSL "$URL" -o "$TMP"; then
     rm -f "$TMP"
     exit 1
 fi
+
+CHECKSUMS_TMP=$(mktemp)
+if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS_TMP"; then
+    echo "Failed to download release checksums"
+    rm -f "$TMP" "$CHECKSUMS_TMP"
+    exit 1
+fi
+
+EXPECTED=$(grep "cloudcode-${TARGET}$" "$CHECKSUMS_TMP" | awk '{print $1}')
+ACTUAL=$(sha256_file "$TMP")
+
+if [ -z "$EXPECTED" ]; then
+    echo "Could not find checksum entry for cloudcode-${TARGET}"
+    rm -f "$TMP" "$CHECKSUMS_TMP"
+    exit 1
+fi
+
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Checksum verification failed for ${BINARY}-${TARGET}"
+    echo "Expected: ${EXPECTED}"
+    echo "Actual:   ${ACTUAL}"
+    rm -f "$TMP" "$CHECKSUMS_TMP"
+    exit 1
+fi
+
+rm -f "$CHECKSUMS_TMP"
 
 chmod +x "$TMP"
 

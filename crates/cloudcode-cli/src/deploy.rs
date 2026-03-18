@@ -30,6 +30,11 @@ fn ssh_command_args(ip: &str, command: &str) -> Result<Vec<String>> {
     Ok(args)
 }
 
+fn cached_file_path(prefix: &str, suffix: &str, checksum: &str) -> Result<PathBuf> {
+    let cache_dir = cloudcode_cache_dir()?;
+    Ok(cache_dir.join(format!("{prefix}-{checksum}{suffix}")))
+}
+
 /// Map a Hetzner server type name to a Rust target triple.
 /// CAX = ARM64, CX/CPX = x86_64.
 pub fn target_triple_for_server_type(server_type: &str) -> &'static str {
@@ -50,9 +55,7 @@ pub fn get_daemon_binary(target: &str) -> Result<PathBuf> {
     }
 
     // 2. Fall back to remote build on the VPS
-    eprintln!(
-        "  No embedded daemon binary (dev build). Building on VPS instead (3-5 min)..."
-    );
+    eprintln!("  No embedded daemon binary (dev build). Building on VPS instead (3-5 min)...");
     match remote_build_daemon(target) {
         Ok(path) => return Ok(path),
         Err(e) => {
@@ -87,8 +90,8 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
     }
     let ip = state.server_ip.as_ref().context("No server IP")?;
 
-    // Upload source
-    upload_source(&state)?;
+    // Upload packaged source
+    upload_source_bundle(&state)?;
 
     // Install Rust on VPS if not present
     let check = std::process::Command::new("ssh")
@@ -113,6 +116,28 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
         }
     }
 
+    // Ensure a native linker/toolchain exists for cargo builds.
+    let build_tools = std::process::Command::new("ssh")
+        .args(ssh_command_args(ip, "which cc >/dev/null 2>&1")?)
+        .status()
+        .context("Failed to check for native build tools on VPS")?;
+    if !build_tools.success() {
+        eprintln!(
+            "  {} Installing native build tools on VPS...",
+            "→".to_string()
+        );
+        let install = std::process::Command::new("ssh")
+            .args(ssh_command_args(
+                ip,
+                "sudo apt-get update && sudo apt-get install -y build-essential pkg-config",
+            )?)
+            .status()
+            .context("Failed to install native build tools on VPS")?;
+        if !install.success() {
+            anyhow::bail!("Failed to install native build tools on VPS");
+        }
+    }
+
     // Build on VPS
     let output = std::process::Command::new("ssh")
         .args(ssh_command_args(
@@ -129,7 +154,7 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
     }
 
     // Download the binary from VPS to local temp
-    let tmp_path = std::env::temp_dir().join(format!("cloudcode-daemon-remote-{target}"));
+    let tmp_path = cached_file_path("cloudcode-daemon-remote", "", target)?;
     let mut scp_args = ssh_base_args(ip)?;
     scp_args.extend([
         format!("claude@{ip}:/home/claude/cloudcode-src/target/release/cloudcode-daemon"),
@@ -147,19 +172,61 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
     Ok(tmp_path)
 }
 
-/// Upload project source to VPS via rsync (used by remote build fallback).
-fn upload_source(state: &VpsState) -> Result<()> {
-    let ip = state.server_ip.as_ref().context("No server IP")?;
+fn source_bundle_path() -> Result<PathBuf> {
+    let final_path = cached_file_path(
+        "cloudcode-source",
+        ".tar.gz",
+        embedded::SOURCE_BUNDLE_SHA256,
+    )?;
+    if final_path.exists() {
+        return Ok(final_path);
+    }
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .context("Could not determine workspace root")?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = final_path.with_extension(format!("{nonce}.tmp"));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .context("Failed to create source bundle temp file")?;
+    drop(file);
+    std::fs::write(&tmp_path, embedded::SOURCE_BUNDLE)
+        .context("Failed to write embedded source bundle")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    std::fs::rename(&tmp_path, &final_path)
+        .or_else(|err| {
+            if final_path.exists() {
+                let _ = std::fs::remove_file(&tmp_path);
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })
+        .context("Failed to finalize source bundle")?;
+
+    Ok(final_path)
+}
+
+/// Upload packaged source to VPS for the remote build fallback.
+fn upload_source_bundle(state: &VpsState) -> Result<()> {
+    let ip = state.server_ip.as_ref().context("No server IP")?;
+    let source_bundle = source_bundle_path()?;
 
     // Create target directory
     let mkdir_status = std::process::Command::new("ssh")
-        .args(ssh_command_args(ip, "mkdir -p /home/claude/cloudcode-src")?)
+        .args(ssh_command_args(
+            ip,
+            "rm -rf /home/claude/cloudcode-src && mkdir -p /home/claude",
+        )?)
         .status()
         .context("Failed to create remote directory")?;
 
@@ -167,39 +234,32 @@ fn upload_source(state: &VpsState) -> Result<()> {
         anyhow::bail!("Failed to create remote directory");
     }
 
-    // Build rsync -e argument with SSH options
-    let ssh_args = ssh_base_args(ip)?;
-    let ssh_cmd = ssh_args
-        .iter()
-        .map(|a| {
-            if a.contains(' ') || a.contains('\'') {
-                format!("'{}'", a.replace('\'', "'\\''"))
-            } else {
-                a.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let rsh = format!("ssh {ssh_cmd}");
-
-    let status = std::process::Command::new("rsync")
-        .args([
-            "-az",
-            "--exclude",
-            "target/",
-            "--exclude",
-            ".git/",
-            "-e",
-            &rsh,
-            &format!("{}/", workspace_root.display()),
-            &format!("claude@{ip}:/home/claude/cloudcode-src/"),
-        ])
+    let mut scp_args = ssh_base_args(ip)?;
+    scp_args.extend([
+        source_bundle.to_string_lossy().to_string(),
+        format!("claude@{ip}:/tmp/cloudcode-source.tar.gz"),
+    ]);
+    let status = std::process::Command::new("scp")
+        .args(&scp_args)
         .status()
-        .context("Failed to rsync source. Is rsync installed?")?;
+        .context("Failed to upload source bundle")?;
 
     if !status.success() {
-        anyhow::bail!("rsync failed");
+        anyhow::bail!("scp failed while uploading source bundle");
     }
+
+    let extract_status = std::process::Command::new("ssh")
+        .args(ssh_command_args(
+            ip,
+            "tar -xzf /tmp/cloudcode-source.tar.gz -C /home/claude && rm -f /tmp/cloudcode-source.tar.gz",
+        )?)
+        .status()
+        .context("Failed to unpack source bundle on VPS")?;
+
+    if !extract_status.success() {
+        anyhow::bail!("Failed to unpack source bundle on VPS");
+    }
+
     Ok(())
 }
 

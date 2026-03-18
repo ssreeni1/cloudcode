@@ -15,9 +15,9 @@ fn mask_secret(s: &str) -> String {
     }
 }
 
-/// Check that required CLI tools (ssh, rsync, ssh-keygen) are available on PATH.
+/// Check that required CLI tools (ssh, ssh-keygen) are available on PATH.
 fn check_required_tools() -> Result<()> {
-    let tools = ["ssh", "rsync", "ssh-keygen"];
+    let tools = ["ssh", "ssh-keygen"];
     let mut missing = Vec::new();
 
     for tool in &tools {
