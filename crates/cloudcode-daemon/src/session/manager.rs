@@ -334,7 +334,7 @@ impl SessionManager {
                    echo '[cloudcode] Codex needs authentication. Starting device auth flow...'; \
                    /usr/local/bin/codex login --device-auth; \
                  fi; \
-                 while true; do /usr/local/bin/codex --full-auto --skip-git-repo-check --add-dir /home/claude/.cloudcode/contexts; \
+                 while true; do /usr/local/bin/codex --full-auto --add-dir /home/claude/.cloudcode/contexts; \
                  echo '\\n[cloudcode] Codex exited. Restarting in 3s... (Ctrl-C to stop)'; \
                  sleep 3; done".to_string()
             }

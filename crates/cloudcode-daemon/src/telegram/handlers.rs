@@ -131,14 +131,46 @@ async fn handle_spawn(
                 .await?;
             }
 
-            bot.send_message(
-                msg.chat.id,
-                format!(
-                    "✅ Session '{}' created and set as default. Send any message to start chatting.",
-                    session.name
-                ),
-            )
-            .await?;
+            // Check if the session is still alive after a short delay.
+            // If the AI needs auth (OAuth/device-code), it exits immediately
+            // and the user needs to complete login from the CLI first.
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            let sessions = state.session_mgr.list().await.unwrap_or_default();
+            let still_alive = sessions.iter().any(|s| s.name == session.name);
+
+            if still_alive {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "✅ Session '{}' created and set as default. Send any message to start chatting.",
+                        session.name
+                    ),
+                )
+                .await?;
+            } else {
+                let provider = state.session_mgr.current_provider();
+                let auth_hint = match provider {
+                    cloudcode_common::provider::AiProvider::Claude =>
+                        "Run from your terminal:\n\
+                         1. cloudcode spawn\n\
+                         2. cloudcode open <session>\n\
+                         3. Copy the login URL and paste in your browser",
+                    cloudcode_common::provider::AiProvider::Codex =>
+                        "Run from your terminal:\n\
+                         1. cloudcode spawn\n\
+                         2. cloudcode open <session>\n\
+                         3. Select 'Device code' when prompted\n\
+                         4. Visit the URL in your browser to authorize",
+                };
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "⚠️ Session '{}' was created but exited immediately — {} likely needs authentication.\n\n{}\n\nTelegram will work once login is complete.",
+                        session.name, provider, auth_hint
+                    ),
+                )
+                .await?;
+            }
         }
         Err(err) => {
             if is_oauth_error(&err) {
