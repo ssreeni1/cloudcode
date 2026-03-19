@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, bail};
+use cloudcode_common::provider::AiProvider;
 use cloudcode_common::session::{SessionInfo, SessionState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
 /// Output from a send operation, including text and any files created.
 pub struct SendOutput {
@@ -80,6 +84,28 @@ fn is_sendable_file(path: &PathBuf) -> bool {
             | "html"
             | "log"
     )
+}
+
+/// Find the claude binary — checks ~/.local/bin/claude (curl installer)
+/// then /usr/local/bin/claude (npm installer).
+fn find_claude_bin() -> String {
+    let home = daemon_home_dir();
+    let local_bin = home.join(".local/bin/claude");
+    if local_bin.exists() {
+        return local_bin.to_string_lossy().to_string();
+    }
+    // npm global install path
+    "/usr/local/bin/claude".to_string()
+}
+
+/// Strip ANSI escape codes from a string.
+///
+/// Removes sequences matching `\x1b\[[0-9;]*[a-zA-Z]`, which covers standard
+/// SGR (color/style), cursor movement, and erase codes.
+fn strip_ansi_codes(input: &str) -> String {
+    static ANSI_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
+    ANSI_RE.replace_all(input, "").to_string()
 }
 
 /// Validate that a session name contains only safe characters.
@@ -190,16 +216,45 @@ fn session_snapshot_dirs_from_workdir(workdir: &Path, session_tmp: Option<&Path>
 
 pub struct SessionManager {
     send_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    default_provider: RwLock<AiProvider>,
 }
 
 impl SessionManager {
-    pub fn new() -> Self {
+    pub fn new(provider: AiProvider) -> Self {
         Self {
             send_locks: std::sync::Mutex::new(HashMap::new()),
+            default_provider: RwLock::new(provider),
         }
     }
 
-    /// Spawn a new Claude Code session in tmux
+    /// Get the current default provider.
+    pub fn current_provider(&self) -> AiProvider {
+        *self.default_provider.read().unwrap()
+    }
+
+    /// Set the default provider (persists to file).
+    pub fn set_provider(&self, provider: AiProvider) {
+        *self.default_provider.write().unwrap() = provider;
+        let path = daemon_home_dir()
+            .join(".cloudcode")
+            .join("default-provider");
+        let _ = std::fs::write(&path, provider.as_str());
+    }
+
+    /// Get the provider for a specific session (reads per-session file, falls back to default).
+    fn session_provider(&self, session: &str) -> AiProvider {
+        let path = daemon_home_dir()
+            .join(".cloudcode")
+            .join("sessions")
+            .join(session)
+            .join("provider");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or_else(|| self.current_provider())
+    }
+
+    /// Spawn a new AI coding session in tmux
     pub async fn spawn(&self, name: Option<String>) -> Result<SessionInfo> {
         let name = name.unwrap_or_else(|| {
             let ts = SystemTime::now()
@@ -229,21 +284,61 @@ impl SessionManager {
         let workspace = session_workspace_dir(&name)?;
         let workspace_arg = workspace.to_string_lossy().to_string();
 
+        // Ensure workspace is a git repo (Codex requires it)
+        let git_dir = workspace.join(".git");
+        if !git_dir.exists() {
+            let _ = Command::new("git")
+                .args(["init"])
+                .current_dir(&workspace)
+                .output()
+                .await;
+        }
+
         // Check if session already exists
         if self.session_exists(&name).await {
             bail!("Session '{}' already exists", name);
         }
 
         // Create tmux session running claude
-        // Claude Code installs to ~/.local/bin/claude
-        // Use shell wrapper to pass all flags properly to claude
+        // Claude Code may be at ~/.local/bin/claude (curl installer) or
+        // /usr/local/bin/claude (npm installer). Use whichever exists.
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/claude".to_string());
-        let claude_bin = format!("{}/.local/bin/claude", home);
         let home_env = format!("HOME={}", home);
-        let shell_cmd = format!(
-            "exec {} --dangerously-skip-permissions --permission-mode bypassPermissions",
-            claude_bin
-        );
+        let provider = self.current_provider();
+
+        // Record provider for this session
+        let provider_file = daemon_home_dir()
+            .join(".cloudcode")
+            .join("sessions")
+            .join(&name)
+            .join("provider");
+        let _ = std::fs::write(&provider_file, provider.as_str());
+
+        // Wrap in a retry loop so the tmux session survives if the provider
+        // exits (e.g. OAuth login required). The user can `open` the session,
+        // complete OAuth, and the provider restarts automatically.
+        let shell_cmd = match provider {
+            AiProvider::Claude => {
+                let claude_bin = find_claude_bin();
+                format!(
+                    "while true; do {} --dangerously-skip-permissions --permission-mode bypassPermissions; \
+                     echo '\\n[cloudcode] Claude exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done",
+                    claude_bin
+                )
+            }
+            AiProvider::Codex => {
+                // Use device-auth for OAuth login on remote VPS (localhost redirect won't work).
+                // Check login status first; only prompt if not authenticated.
+                "if ! /usr/local/bin/codex login status >/dev/null 2>&1; then \
+                   echo '[cloudcode] Codex needs authentication. Starting device auth flow...'; \
+                   /usr/local/bin/codex login --device-auth; \
+                 fi; \
+                 while true; do /usr/local/bin/codex --full-auto --skip-git-repo-check --add-dir /home/claude/.cloudcode/contexts; \
+                 echo '\\n[cloudcode] Codex exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                 sleep 3; done".to_string()
+            }
+        };
         // Create session-scoped temp dir
         let session_tmp = daemon_home_dir()
             .join(".cloudcode")
@@ -254,13 +349,15 @@ impl SessionManager {
             format!("Failed to create session tmp dir {}", session_tmp.display())
         })?;
 
-        // Create CLAUDE.md symlink in workspace if not already present
-        let workspace_claude_md = workspace.join("CLAUDE.md");
-        let global_claude_md = daemon_home_dir().join("CLAUDE.md");
-        if global_claude_md.exists() && !workspace_claude_md.exists() {
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(&global_claude_md, &workspace_claude_md);
+        // Create instruction file symlinks in workspace
+        for filename in &["CLAUDE.md", "AGENTS.md"] {
+            let workspace_file = workspace.join(filename);
+            let global_file = daemon_home_dir().join(filename);
+            if global_file.exists() && !workspace_file.exists() {
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(&global_file, &workspace_file);
+                }
             }
         }
 
@@ -403,8 +500,17 @@ impl SessionManager {
         let _guard = lock.lock().await;
 
         let home = daemon_home_dir().to_string_lossy().to_string();
-        let claude_bin = format!("{}/.local/bin/claude", home);
         let workdir = session_runtime_workdir(session).await?;
+        let provider = self.session_provider(session);
+
+        // Ensure workdir is a git repo (Codex requires it)
+        if !workdir.join(".git").exists() {
+            let _ = Command::new("git")
+                .args(["init"])
+                .current_dir(&workdir)
+                .output()
+                .await;
+        }
 
         // Session-scoped temp dir for file detection
         let session_tmp = daemon_home_dir()
@@ -420,24 +526,69 @@ impl SessionManager {
         let watch_dirs = session_snapshot_dirs_from_workdir(&workdir, Some(&session_tmp));
         let files_before = snapshot_files(&watch_dirs);
 
-        // Use claude -p (print mode) for clean text output.
-        let output = Command::new(&claude_bin)
-            .args([
-                "-p",
-                "--dangerously-skip-permissions",
-                "--continue",
-                message,
-            ])
-            .env("CLOUDCODE_SESSION_NAME", session)
-            .env("TMPDIR", &session_tmp)
-            .current_dir(&workdir)
-            .output()
-            .await
-            .context("Failed to run claude in print mode")?;
+        // Run provider in print/exec mode for clean text output.
+        // Wrap in a 5-minute timeout so a hanging subprocess cannot hold the
+        // per-session lock forever.  When the timeout fires the future is
+        // dropped, which drops the Child and kills the process.
+        const AI_TIMEOUT: Duration = Duration::from_secs(300);
+
+        let output = match provider {
+            AiProvider::Claude => {
+                let claude_bin = find_claude_bin();
+                let fut = Command::new(&claude_bin)
+                    .args([
+                        "-p",
+                        "--dangerously-skip-permissions",
+                        "--continue",
+                        message,
+                    ])
+                    .env("CLOUDCODE_SESSION_NAME", session)
+                    .env("TMPDIR", &session_tmp)
+                    .current_dir(&workdir)
+                    .output();
+                timeout(AI_TIMEOUT, fut)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("AI subprocess timed out after 5 minutes"))?
+                    .context("Failed to run claude in print mode")?
+            }
+            AiProvider::Codex => {
+                let contexts_dir = daemon_home_dir()
+                    .join(".cloudcode")
+                    .join("contexts")
+                    .to_string_lossy()
+                    .to_string();
+                let fut = Command::new("/usr/local/bin/codex")
+                    .args([
+                        "exec",
+                        "--full-auto",
+                        "--skip-git-repo-check",
+                        "--add-dir",
+                        &contexts_dir,
+                        message,
+                    ])
+                    .env("CLOUDCODE_SESSION_NAME", session)
+                    .env("TMPDIR", &session_tmp)
+                    .current_dir(&workdir)
+                    .output();
+                timeout(AI_TIMEOUT, fut)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("AI subprocess timed out after 5 minutes"))?
+                    .context("Failed to run codex exec")?
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("claude -p failed: {}", stderr);
+            bail!("{} failed: {}", provider, stderr);
+        }
+
+        // Log stderr at debug level (Codex streams progress to stderr)
+        if !output.stderr.is_empty() {
+            log::debug!(
+                "{} stderr: {}",
+                provider,
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -490,9 +641,7 @@ impl SessionManager {
         }
 
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
-        // Strip ANSI escape codes
-        let ansi_re = regex::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
-        let clean = ansi_re.replace_all(&raw, "").to_string();
+        let clean = strip_ansi_codes(&raw);
         Ok(clean)
     }
 
@@ -597,13 +746,33 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn session_manager_new_has_no_extra_fields() {
-        // SessionManager should only have send_locks now
-        // (output_counter and output_dir were removed)
-        let mgr = SessionManager::new();
-        // Verify send_locks is accessible and empty
+    fn session_manager_new_has_correct_defaults() {
+        let mgr = SessionManager::new(AiProvider::Claude);
         let locks = mgr.send_locks.lock().unwrap();
         assert!(locks.is_empty());
+        assert_eq!(mgr.current_provider(), AiProvider::Claude);
+    }
+
+    #[test]
+    fn session_manager_provider_switch() {
+        let mgr = SessionManager::new(AiProvider::Claude);
+        assert_eq!(mgr.current_provider(), AiProvider::Claude);
+        mgr.set_provider(AiProvider::Codex);
+        assert_eq!(mgr.current_provider(), AiProvider::Codex);
+    }
+
+    #[test]
+    fn ai_provider_from_str() {
+        assert_eq!("claude".parse::<AiProvider>().unwrap(), AiProvider::Claude);
+        assert_eq!("codex".parse::<AiProvider>().unwrap(), AiProvider::Codex);
+        assert_eq!("Claude".parse::<AiProvider>().unwrap(), AiProvider::Claude);
+        assert!("unknown".parse::<AiProvider>().is_err());
+    }
+
+    #[test]
+    fn ai_provider_display() {
+        assert_eq!(AiProvider::Claude.to_string(), "claude");
+        assert_eq!(AiProvider::Codex.to_string(), "codex");
     }
 
     #[test]
@@ -711,5 +880,92 @@ mod tests {
         assert!(!paths.contains(&"pkg.json".to_string()));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_ansi_codes tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strip_ansi_codes_empty_string() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn strip_ansi_codes_plain_text_unchanged() {
+        let input = "Hello, world! 123 #$%";
+        assert_eq!(strip_ansi_codes(input), input);
+    }
+
+    #[test]
+    fn strip_ansi_codes_basic_color_red() {
+        assert_eq!(strip_ansi_codes("\x1b[31mred text\x1b[0m"), "red text");
+    }
+
+    #[test]
+    fn strip_ansi_codes_reset() {
+        assert_eq!(strip_ansi_codes("\x1b[0m"), "");
+    }
+
+    #[test]
+    fn strip_ansi_codes_256_color() {
+        // 256-color foreground: ESC[38;5;196m
+        assert_eq!(
+            strip_ansi_codes("\x1b[38;5;196mcolored\x1b[0m"),
+            "colored"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_bold_and_underline() {
+        assert_eq!(strip_ansi_codes("\x1b[1mbold\x1b[0m"), "bold");
+        assert_eq!(strip_ansi_codes("\x1b[4munderline\x1b[0m"), "underline");
+    }
+
+    #[test]
+    fn strip_ansi_codes_cursor_movement_clear_screen() {
+        // ESC[2J clears the screen
+        assert_eq!(strip_ansi_codes("\x1b[2J"), "");
+        // ESC[H moves cursor to home
+        assert_eq!(strip_ansi_codes("\x1b[H"), "");
+        // ESC[10;20H moves cursor to row 10, col 20
+        assert_eq!(strip_ansi_codes("before\x1b[10;20Hafter"), "beforeafter");
+    }
+
+    #[test]
+    fn strip_ansi_codes_mixed_text_and_codes() {
+        assert_eq!(
+            strip_ansi_codes("Hello \x1b[31mworld\x1b[0m!"),
+            "Hello world!"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_multiple_codes_in_sequence() {
+        // Bold + red + text + reset
+        assert_eq!(
+            strip_ansi_codes("\x1b[1m\x1b[31mhello\x1b[0m"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_preserves_newlines_and_whitespace() {
+        let input = "\x1b[32mline1\x1b[0m\nline2\n  \x1b[33mline3\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "line1\nline2\n  line3");
+    }
+
+    #[test]
+    fn strip_ansi_codes_combined_sgr_parameters() {
+        // ESC[1;31;4m = bold + red + underline
+        assert_eq!(
+            strip_ansi_codes("\x1b[1;31;4mstyled\x1b[0m"),
+            "styled"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_only_codes_no_text() {
+        assert_eq!(strip_ansi_codes("\x1b[31m\x1b[0m\x1b[2J"), "");
     }
 }
