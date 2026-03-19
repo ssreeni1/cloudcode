@@ -135,18 +135,7 @@ async fn handle_spawn(
             // If not, the session is alive (retry loop) but stuck waiting for
             // login — warn the user to complete auth from the CLI.
             let provider = state.session_mgr.current_provider();
-            let has_auth = match provider {
-                cloudcode_common::provider::AiProvider::Claude => {
-                    // Claude: API key in env OR OAuth credentials file
-                    std::env::var("ANTHROPIC_API_KEY").is_ok()
-                        || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
-                }
-                cloudcode_common::provider::AiProvider::Codex => {
-                    // Codex: API key in env OR auth.json from device-code login
-                    std::env::var("OPENAI_API_KEY").is_ok()
-                        || std::path::Path::new("/home/claude/.codex/auth.json").exists()
-                }
-            };
+            let has_auth = provider_has_auth(provider);
 
             if has_auth {
                 bot.send_message(
@@ -159,16 +148,18 @@ async fn handle_spawn(
                 .await?;
             } else {
                 let auth_hint = match provider {
-                    cloudcode_common::provider::AiProvider::Claude =>
+                    cloudcode_common::provider::AiProvider::Claude => {
                         "Complete login from your terminal:\n\
                          1. cloudcode open {session}\n\
                          2. Copy the login URL and paste in your browser\n\
-                         3. Complete the OAuth flow",
-                    cloudcode_common::provider::AiProvider::Codex =>
+                         3. Complete the OAuth flow"
+                    }
+                    cloudcode_common::provider::AiProvider::Codex => {
                         "Complete login from your terminal:\n\
                          1. cloudcode open {session}\n\
                          2. Select 'Device code' when prompted\n\
-                         3. Visit the URL in your browser to authorize",
+                         3. Visit the URL in your browser to authorize"
+                    }
                 };
                 let hint = auth_hint.replace("{session}", &session.name);
                 bot.send_message(
@@ -185,10 +176,12 @@ async fn handle_spawn(
             let provider = state.session_mgr.current_provider();
             if is_auth_error(&err, provider) {
                 let auth_hint = match provider {
-                    cloudcode_common::provider::AiProvider::Claude =>
-                        "Run `cloudcode open <session>` from your terminal to complete the OAuth login.",
-                    cloudcode_common::provider::AiProvider::Codex =>
-                        "Run `cloudcode open <session>` from your terminal, select 'Device code', and authorize in your browser.",
+                    cloudcode_common::provider::AiProvider::Claude => {
+                        "Run `cloudcode open <session>` from your terminal to complete the OAuth login."
+                    }
+                    cloudcode_common::provider::AiProvider::Codex => {
+                        "Run `cloudcode open <session>` from your terminal, select 'Device code', and authorize in your browser."
+                    }
                 };
                 bot.send_message(
                     msg.chat.id,
@@ -383,28 +376,38 @@ struct ProviderStatus {
     switchable: bool,
 }
 
+fn provider_has_auth(provider: AiProvider) -> bool {
+    match provider {
+        AiProvider::Claude => {
+            std::env::var("ANTHROPIC_API_KEY").is_ok()
+                || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
+        }
+        AiProvider::Codex => {
+            std::env::var("OPENAI_API_KEY").is_ok()
+                || std::path::Path::new("/home/claude/.codex/auth.json").exists()
+        }
+    }
+}
+
 fn provider_status(provider: AiProvider) -> ProviderStatus {
     match provider {
         AiProvider::Claude => {
-            let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
-            let has_oauth = std::path::Path::new("/home/claude/.claude/.credentials.json").exists();
-            match (has_api_key, has_oauth) {
-                (true, _) | (_, true) => ProviderStatus {
+            if provider_has_auth(provider) {
+                ProviderStatus {
                     summary: "✅ ready",
                     reason: "configured",
                     switchable: true,
-                },
-                (false, false) => ProviderStatus {
+                }
+            } else {
+                ProviderStatus {
                     summary: "❌ not configured",
                     reason: "ANTHROPIC_API_KEY not set and Claude OAuth login not completed",
                     switchable: false,
-                },
+                }
             }
         }
         AiProvider::Codex => {
             let binary_exists = std::path::Path::new("/usr/local/bin/codex").exists();
-            let has_api_key = std::env::var("OPENAI_API_KEY").is_ok();
-            let has_oauth = std::path::Path::new("/home/claude/.codex/auth.json").exists();
             let install_status =
                 std::fs::read_to_string("/home/claude/.cloudcode/codex-status.json")
                     .unwrap_or_default();
@@ -425,7 +428,7 @@ fn provider_status(provider: AiProvider) -> ProviderStatus {
                 };
             }
 
-            if has_api_key || has_oauth {
+            if provider_has_auth(provider) {
                 return ProviderStatus {
                     summary: "✅ ready",
                     reason: "configured",
@@ -757,16 +760,18 @@ async fn handle_free_text(
             let provider = state.session_mgr.current_provider();
             if is_auth_error(&err, provider) {
                 let auth_hint = match provider {
-                    cloudcode_common::provider::AiProvider::Claude =>
+                    cloudcode_common::provider::AiProvider::Claude => {
                         "Complete login from your terminal:\n\
                          1. cloudcode open <session>\n\
                          2. Copy the login URL and paste in your browser\n\
-                         3. Complete the OAuth flow",
-                    cloudcode_common::provider::AiProvider::Codex =>
+                         3. Complete the OAuth flow"
+                    }
+                    cloudcode_common::provider::AiProvider::Codex => {
                         "Complete login from your terminal:\n\
                          1. cloudcode open <session>\n\
                          2. Select 'Device code' when prompted\n\
-                         3. Visit the URL in your browser to authorize",
+                         3. Visit the URL in your browser to authorize"
+                    }
                 };
                 send_text(
                     bot,
@@ -787,41 +792,40 @@ async fn handle_free_text(
 }
 
 /// Check if an error is likely caused by missing authentication.
-/// Checks both the error message AND whether credentials actually exist on disk.
-fn is_auth_error(err: &anyhow::Error, provider: cloudcode_common::provider::AiProvider) -> bool {
+/// Keep this narrow so generic provider failures are not relabeled as login issues.
+fn is_auth_error(err: &anyhow::Error, _provider: cloudcode_common::provider::AiProvider) -> bool {
     let err_str = err.to_string().to_lowercase();
 
-    // Check error message for auth-related keywords
-    let msg_match = err_str.contains("auth")
+    err_str.contains("auth")
         || err_str.contains("login")
         || err_str.contains("oauth")
         || err_str.contains("unauthorized")
         || err_str.contains("credentials")
         || err_str.contains("401")
         || err_str.contains("not logged in")
-        || err_str.contains("api key");
+        || err_str.contains("api key")
+}
 
-    if msg_match {
-        return true;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn auth_error_detects_explicit_login_failures() {
+        let err = anyhow!("codex failed: Not logged in. Run `codex login`.");
+        assert!(is_auth_error(&err, AiProvider::Codex));
     }
 
-    // If the provider binary failed (non-zero exit) and credentials are missing,
-    // it's almost certainly an auth issue even if the error message is vague.
-    if err_str.contains("failed:") {
-        let has_creds = match provider {
-            cloudcode_common::provider::AiProvider::Claude => {
-                std::env::var("ANTHROPIC_API_KEY").is_ok()
-                    || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
-            }
-            cloudcode_common::provider::AiProvider::Codex => {
-                std::env::var("OPENAI_API_KEY").is_ok()
-                    || std::path::Path::new("/home/claude/.codex/auth.json").exists()
-            }
-        };
-        if !has_creds {
-            return true;
-        }
+    #[test]
+    fn auth_error_detects_api_key_failures() {
+        let err = anyhow!("claude failed: API key missing");
+        assert!(is_auth_error(&err, AiProvider::Claude));
     }
 
-    false
+    #[test]
+    fn auth_error_does_not_mask_generic_provider_failures() {
+        let err = anyhow!("codex failed: connection reset by peer");
+        assert!(!is_auth_error(&err, AiProvider::Codex));
+    }
 }
