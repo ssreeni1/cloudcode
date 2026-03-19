@@ -131,14 +131,24 @@ async fn handle_spawn(
                 .await?;
             }
 
-            // Check if the session is still alive after a short delay.
-            // If the AI needs auth (OAuth/device-code), it exits immediately
-            // and the user needs to complete login from the CLI first.
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            let sessions = state.session_mgr.list().await.unwrap_or_default();
-            let still_alive = sessions.iter().any(|s| s.name == session.name);
+            // Check if the current provider has auth credentials on the VPS.
+            // If not, the session is alive (retry loop) but stuck waiting for
+            // login — warn the user to complete auth from the CLI.
+            let provider = state.session_mgr.current_provider();
+            let has_auth = match provider {
+                cloudcode_common::provider::AiProvider::Claude => {
+                    // Claude: API key in env OR OAuth credentials file
+                    std::env::var("ANTHROPIC_API_KEY").is_ok()
+                        || std::path::Path::new("/home/claude/.claude/credentials.json").exists()
+                }
+                cloudcode_common::provider::AiProvider::Codex => {
+                    // Codex: API key in env OR auth.json from device-code login
+                    std::env::var("OPENAI_API_KEY").is_ok()
+                        || std::path::Path::new("/home/claude/.codex/auth.json").exists()
+                }
+            };
 
-            if still_alive {
+            if has_auth {
                 bot.send_message(
                     msg.chat.id,
                     format!(
@@ -148,25 +158,24 @@ async fn handle_spawn(
                 )
                 .await?;
             } else {
-                let provider = state.session_mgr.current_provider();
                 let auth_hint = match provider {
                     cloudcode_common::provider::AiProvider::Claude =>
-                        "Run from your terminal:\n\
-                         1. cloudcode spawn\n\
-                         2. cloudcode open <session>\n\
-                         3. Copy the login URL and paste in your browser",
+                        "Complete login from your terminal:\n\
+                         1. cloudcode open {session}\n\
+                         2. Copy the login URL and paste in your browser\n\
+                         3. Complete the OAuth flow",
                     cloudcode_common::provider::AiProvider::Codex =>
-                        "Run from your terminal:\n\
-                         1. cloudcode spawn\n\
-                         2. cloudcode open <session>\n\
-                         3. Select 'Device code' when prompted\n\
-                         4. Visit the URL in your browser to authorize",
+                        "Complete login from your terminal:\n\
+                         1. cloudcode open {session}\n\
+                         2. Select 'Device code' when prompted\n\
+                         3. Visit the URL in your browser to authorize",
                 };
+                let hint = auth_hint.replace("{session}", &session.name);
                 bot.send_message(
                     msg.chat.id,
                     format!(
-                        "⚠️ Session '{}' was created but exited immediately — {} likely needs authentication.\n\n{}\n\nTelegram will work once login is complete.",
-                        session.name, provider, auth_hint
+                        "⚠️ Session '{}' created, but {} needs authentication first.\n\n{}\n\nTelegram will work once login is complete.",
+                        session.name, provider, hint
                     ),
                 )
                 .await?;
