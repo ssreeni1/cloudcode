@@ -3,7 +3,9 @@ use colored::Colorize;
 use dialoguer::{Confirm, Input, Select};
 use std::process::Command as ProcessCommand;
 
-use crate::config::{AuthMethod, ClaudeConfig, Config, HetznerConfig, TelegramConfig};
+use crate::config::{
+    AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig,
+};
 use crate::hetzner::client::HetznerClient;
 
 /// Mask a secret string, showing only the first 4 characters followed by dots.
@@ -40,7 +42,6 @@ fn check_required_tools() -> Result<()> {
 }
 
 pub async fn run(auto: bool, reauth: bool) -> Result<()> {
-    // Check required tools are available
     check_required_tools()?;
 
     println!("\n{}", "Welcome to cloudcode setup!".bold().cyan());
@@ -55,8 +56,8 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
 
     let mut config = Config::load()?;
 
-    // Init re-run protection: if config already has hetzner + claude and --reauth is not set, confirm overwrite
-    if !reauth && config.hetzner.is_some() && config.claude.is_some() {
+    // Init re-run protection
+    if !reauth && config.hetzner.is_some() && (config.claude.is_some() || config.codex.is_some()) {
         print!(
             "  {} ",
             "Configuration already exists. Overwrite? [y/N]".yellow()
@@ -129,9 +130,66 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         config.hetzner = Some(HetznerConfig { api_token });
     }
 
-    // Step 2: Claude auth
-    if !reauth || config.claude.is_none() {
-        println!("\n{}", "Step 2: Claude Authentication".bold().cyan());
+    // Step 2: AI Provider selection
+    let (wants_claude, wants_codex) = if !reauth {
+        println!("\n{}", "Step 2: AI Provider".bold().cyan());
+
+        let provider_options = vec!["Claude (Anthropic)", "Codex (OpenAI)", "Both"];
+        let provider_selection = Select::new()
+            .with_prompt("Which AI provider would you like to use?")
+            .items(&provider_options)
+            .default(0)
+            .interact()?;
+
+        match provider_selection {
+            0 => {
+                config.default_provider = Some(AiProvider::Claude);
+                println!(
+                    "  {} Claude selected as default provider",
+                    "✓".green().bold()
+                );
+                (true, false)
+            }
+            1 => {
+                config.default_provider = Some(AiProvider::Codex);
+                println!(
+                    "  {} Codex selected as default provider",
+                    "✓".green().bold()
+                );
+                (false, true)
+            }
+            2 => {
+                let default_options = vec!["Claude", "Codex"];
+                let default_selection = Select::new()
+                    .with_prompt("Which provider should be the default?")
+                    .items(&default_options)
+                    .default(0)
+                    .interact()?;
+                config.default_provider = Some(if default_selection == 0 {
+                    AiProvider::Claude
+                } else {
+                    AiProvider::Codex
+                });
+                println!(
+                    "  {} Both providers, default: {}",
+                    "✓".green().bold(),
+                    config.default_provider.unwrap().display_name()
+                );
+                (true, true)
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        // In reauth mode, keep existing provider choices
+        (
+            config.claude.is_some() || config.default_provider != Some(AiProvider::Codex),
+            config.codex.is_some() || config.default_provider == Some(AiProvider::Codex),
+        )
+    };
+
+    // Step 3: Claude auth
+    if wants_claude && (!reauth || config.claude.is_none()) {
+        println!("\n{}", "Step 3: Claude Authentication".bold().cyan());
 
         println!(
             "  {}",
@@ -194,11 +252,74 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         config.claude = Some(claude_config);
     }
 
-    // Step 3: Telegram (optional)
+    // Step 4: Codex auth
+    if wants_codex && (!reauth || config.codex.is_none()) {
+        println!("\n{}", "Step 4: Codex Authentication".bold().cyan());
+
+        println!(
+            "  {}",
+            "API key: paste a key from platform.openai.com (simpler)".dimmed()
+        );
+        println!(
+            "  {}",
+            "Device auth: log in via openai.com after provisioning (no key needed now)".dimmed()
+        );
+        let auth_options = vec!["API Key", "Device Auth (log in later on VPS)"];
+        let auth_selection = Select::new()
+            .with_prompt("How would you like to authenticate with Codex?")
+            .items(&auth_options)
+            .default(0)
+            .interact()?;
+
+        let codex_config = match auth_selection {
+            0 => {
+                let url = "https://platform.openai.com/api-keys";
+                println!("  {}", "Opening OpenAI Console...".cyan());
+                if open::that(url).is_err() {
+                    println!("  {} {}", "→".dimmed(), url.dimmed());
+                }
+                let api_key: String = Input::new()
+                    .with_prompt("Enter your OpenAI API key")
+                    .interact_text()?;
+                println!(
+                    "  {} API key saved ({})",
+                    "✓".green().bold(),
+                    mask_secret(&api_key).dimmed()
+                );
+                CodexConfig {
+                    auth_method: AuthMethod::ApiKey,
+                    api_key: Some(api_key),
+                }
+            }
+            1 => {
+                println!(
+                    "  {} Device auth selected. After /up, run: /spawn then /open <session>",
+                    "✓".green().bold(),
+                );
+                println!(
+                    "  {}",
+                    "Codex will use device-code auth (works on VPS — no localhost needed).".dimmed()
+                );
+                println!(
+                    "  {}",
+                    "You'll see a code + URL to visit in your browser to authorize.".dimmed()
+                );
+                CodexConfig {
+                    auth_method: AuthMethod::Oauth,
+                    api_key: None,
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        config.codex = Some(codex_config);
+    }
+
+    // Step 5: Telegram (optional)
     if !reauth {
         println!(
             "\n{}",
-            "Step 3: Telegram Notifications (Optional)".bold().cyan()
+            "Step 5: Telegram Notifications (Optional)".bold().cyan()
         );
 
         let setup_telegram = Confirm::new()
@@ -241,8 +362,7 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
             );
             println!(
                 "  {}",
-                "Send /spawn to create a session, then type messages to interact with Claude."
-                    .dimmed()
+                "Send /spawn to create a session, then type messages to interact.".dimmed()
             );
             println!(
                 "  {}",

@@ -76,27 +76,38 @@ struct GetServerResponse {
 }
 
 pub fn estimate_monthly_cost(server_type: &str) -> Option<f64> {
+    // Prices from Hetzner API as of 2026-03. The TUI server picker fetches
+    // live prices; these are fallbacks for status display and quick estimates.
     match server_type {
-        // Current gen (CX Gen3)
-        "cx23" => Some(3.99),
-        "cx33" => Some(6.49),
-        "cx43" => Some(14.99),
-        "cx53" => Some(29.99),
-        // ARM (CAX)
-        "cax11" => Some(3.49),
-        "cax21" => Some(5.49),
-        "cax31" => Some(9.49),
-        "cax41" => Some(16.49),
-        // Deprecated (kept for status display of existing servers)
-        "cx22" => Some(3.99),
-        "cx32" => Some(6.49),
-        "cx42" => Some(14.99),
-        "cx52" => Some(29.99),
-        "cpx11" => Some(3.99),
-        "cpx21" => Some(6.49),
-        "cpx31" => Some(12.49),
-        "cpx41" => Some(23.99),
-        "cpx51" => Some(44.99),
+        // Shared x86 (CX)
+        "cx23" => Some(3.49),
+        "cx33" => Some(5.99),
+        "cx43" => Some(9.99),
+        "cx53" => Some(18.99),
+        // Shared ARM (CAX)
+        "cax11" => Some(3.99),
+        "cax21" => Some(6.99),
+        "cax31" => Some(13.49),
+        "cax41" => Some(26.99),
+        // Shared AMD (CPX)
+        "cpx11" => Some(4.49),
+        "cpx12" => Some(4.49),
+        "cpx21" => Some(7.99),
+        "cpx22" => Some(6.99),
+        "cpx31" => Some(14.99),
+        "cpx32" => Some(11.99),
+        "cpx41" => Some(27.49),
+        "cpx42" => Some(21.99),
+        "cpx51" => Some(60.49),
+        "cpx52" => Some(31.49),
+        "cpx62" => Some(42.99),
+        // Dedicated (CCX)
+        "ccx13" => Some(13.49),
+        "ccx23" => Some(26.49),
+        "ccx33" => Some(53.49),
+        "ccx43" => Some(106.99),
+        "ccx53" => Some(213.49),
+        "ccx63" => Some(319.99),
         _ => None,
     }
 }

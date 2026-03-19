@@ -1,14 +1,23 @@
 use anyhow::{Context, Result};
+pub use cloudcode_common::provider::AiProvider;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CodexConfig {
+    pub auth_method: AuthMethod,
+    pub api_key: Option<String>,
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub hetzner: Option<HetznerConfig>,
     pub claude: Option<ClaudeConfig>,
+    pub codex: Option<CodexConfig>,
     pub telegram: Option<TelegramConfig>,
     pub vps: Option<VpsConfig>,
+    pub default_provider: Option<AiProvider>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -141,6 +150,8 @@ mod tests {
         assert!(config.claude.is_none());
         assert!(config.telegram.is_none());
         assert!(config.vps.is_none());
+        assert!(config.codex.is_none());
+        assert!(config.default_provider.is_none());
     }
 
     #[test]
@@ -152,6 +163,8 @@ mod tests {
         assert!(deserialized.claude.is_none());
         assert!(deserialized.telegram.is_none());
         assert!(deserialized.vps.is_none());
+        assert!(deserialized.codex.is_none());
+        assert!(deserialized.default_provider.is_none());
     }
 
     #[test]
@@ -165,15 +178,17 @@ mod tests {
                 api_key: Some("sk-ant-key".to_string()),
                 oauth_token: None,
             }),
+            codex: None,
             telegram: Some(TelegramConfig {
                 bot_token: "123456:ABC-DEF".to_string(),
                 owner_id: 987654321,
             }),
             vps: Some(VpsConfig {
-                server_type: Some("cx22".to_string()),
+                server_type: Some("cx23".to_string()),
                 location: Some("fsn1".to_string()),
                 image: Some("ubuntu-24.04".to_string()),
             }),
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -192,7 +207,7 @@ mod tests {
         assert_eq!(t.owner_id, 987654321);
 
         let v = deserialized.vps.unwrap();
-        assert_eq!(v.server_type, Some("cx22".to_string()));
+        assert_eq!(v.server_type, Some("cx23".to_string()));
         assert_eq!(v.location, Some("fsn1".to_string()));
         assert_eq!(v.image, Some("ubuntu-24.04".to_string()));
     }
@@ -204,8 +219,10 @@ mod tests {
                 api_token: "token".to_string(),
             }),
             claude: None,
+            codex: None,
             telegram: None,
             vps: None,
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -224,12 +241,14 @@ mod tests {
                 api_token: "tok".to_string(),
             }),
             claude: None,
+            codex: None,
             telegram: None,
             vps: Some(VpsConfig {
-                server_type: Some("cx22".to_string()),
+                server_type: Some("cx23".to_string()),
                 location: None,
                 image: None,
             }),
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -238,7 +257,7 @@ mod tests {
         assert!(deserialized.hetzner.is_some());
         assert!(deserialized.telegram.is_none());
         let v = deserialized.vps.unwrap();
-        assert_eq!(v.server_type, Some("cx22".to_string()));
+        assert_eq!(v.server_type, Some("cx23".to_string()));
         assert!(v.location.is_none());
         assert!(v.image.is_none());
     }
@@ -248,12 +267,14 @@ mod tests {
         let config = Config {
             hetzner: None,
             claude: None,
+            codex: None,
             telegram: None,
             vps: Some(VpsConfig {
                 server_type: None,
                 location: None,
                 image: None,
             }),
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -274,8 +295,10 @@ mod tests {
                 api_key: None,
                 oauth_token: Some("oauth-tok-xyz".to_string()),
             }),
+            codex: None,
             telegram: None,
             vps: None,
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -323,15 +346,90 @@ owner_id = 42
         let config = Config {
             hetzner: None,
             claude: None,
+            codex: None,
             telegram: Some(TelegramConfig {
                 bot_token: "tok".to_string(),
                 owner_id: -1,
             }),
             vps: None,
+            default_provider: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(deserialized.telegram.unwrap().owner_id, -1);
+    }
+
+    #[test]
+    fn ai_provider_default_is_claude() {
+        assert_eq!(AiProvider::default(), AiProvider::Claude);
+    }
+
+    #[test]
+    fn ai_provider_from_str_roundtrip() {
+        assert_eq!("claude".parse::<AiProvider>().unwrap(), AiProvider::Claude);
+        assert_eq!("codex".parse::<AiProvider>().unwrap(), AiProvider::Codex);
+        assert_eq!("Claude".parse::<AiProvider>().unwrap(), AiProvider::Claude);
+        assert_eq!("CODEX".parse::<AiProvider>().unwrap(), AiProvider::Codex);
+        assert!("unknown".parse::<AiProvider>().is_err());
+    }
+
+    #[test]
+    fn ai_provider_display() {
+        assert_eq!(AiProvider::Claude.to_string(), "claude");
+        assert_eq!(AiProvider::Codex.to_string(), "codex");
+    }
+
+    #[test]
+    fn ai_provider_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AiProvider::Claude).unwrap(),
+            "\"claude\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AiProvider::Codex).unwrap(),
+            "\"codex\""
+        );
+    }
+
+    #[test]
+    fn config_with_codex_roundtrip() {
+        let config = Config {
+            hetzner: None,
+            claude: None,
+            codex: Some(CodexConfig {
+                auth_method: AuthMethod::ApiKey,
+                api_key: Some("sk-openai-key".to_string()),
+            }),
+            telegram: None,
+            vps: None,
+            default_provider: Some(AiProvider::Codex),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+
+        assert!(deserialized.codex.is_some());
+        let c = deserialized.codex.unwrap();
+        assert!(matches!(c.auth_method, AuthMethod::ApiKey));
+        assert_eq!(c.api_key, Some("sk-openai-key".to_string()));
+        assert_eq!(deserialized.default_provider, Some(AiProvider::Codex));
+    }
+
+    #[test]
+    fn backward_compat_old_config_without_codex() {
+        // Simulates loading a config.toml written before Codex support was added
+        let toml_str = r#"
+[hetzner]
+api_token = "my-token"
+
+[claude]
+auth_method = "api_key"
+api_key = "sk-ant-key"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.codex.is_none());
+        assert!(config.default_provider.is_none());
+        assert!(config.claude.is_some());
     }
 }

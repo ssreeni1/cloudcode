@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
             server_type,
         }) => commands::up::run(no_wait, server_type).await,
         Some(Command::Down { force }) => commands::down::run(force).await,
+        Some(Command::Provider { provider }) => commands::provider::run(provider).await,
         Some(Command::Status) => commands::status::run().await,
         Some(Command::Doctor) => commands::doctor::run().await,
         Some(Command::Security) => commands::security::run().await,

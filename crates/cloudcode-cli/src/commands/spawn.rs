@@ -42,15 +42,21 @@ pub async fn run(name: Option<String>) -> Result<()> {
                 session.name, session.name
             );
 
-            if let Some(ref claude) = config.claude {
-                if claude.uses_oauth() {
-                    println!(
-                        "\n{}  Run {} (or {}) to complete OAuth login.",
-                        "!".yellow().bold(),
-                        format!("/open {}", session.name).bold(),
-                        format!("cloudcode open {}", session.name).bold()
-                    );
-                    println!("  Highlight and copy the login URL manually (don't press 'c').");
+            let claude_needs_oauth = config.claude.as_ref().is_some_and(|c| c.uses_oauth());
+            let codex_needs_oauth = config.codex.as_ref().is_some_and(|c| matches!(c.auth_method, crate::config::AuthMethod::Oauth));
+
+            if claude_needs_oauth || codex_needs_oauth {
+                println!(
+                    "\n{}  Run {} (or {}) to complete login.",
+                    "!".yellow().bold(),
+                    format!("/open {}", session.name).bold(),
+                    format!("cloudcode open {}", session.name).bold()
+                );
+                if claude_needs_oauth {
+                    println!("  Claude: copy the login URL manually (don't press 'c').");
+                }
+                if codex_needs_oauth {
+                    println!("  Codex: select 'Device code' when prompted, then visit the URL in your browser.");
                 }
             }
         }
