@@ -1,14 +1,15 @@
 use super::manager::SessionManager;
 use anyhow::Result;
 use cloudcode_common::session::{SessionInfo, SessionState};
+use std::sync::Arc;
 use tokio::process::Command;
 
 pub struct SessionMonitor {
-    manager: SessionManager,
+    manager: Arc<SessionManager>,
 }
 
 impl SessionMonitor {
-    pub fn new(manager: SessionManager) -> Self {
+    pub fn new(manager: Arc<SessionManager>) -> Self {
         Self { manager }
     }
 

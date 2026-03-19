@@ -3,13 +3,13 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "cloudcode",
-    about = "Persistent cloud Claude Code sessions",
+    about = "Persistent cloud AI coding sessions",
     version,
     after_help = r#"Quick start:
   cloudcode              # Launch interactive TUI
   cloudcode init         # Run setup wizard
   cloudcode up           # Provision VPS
-  cloudcode spawn        # Create a Claude Code session
+  cloudcode spawn        # Create an AI coding session
   cloudcode open <name>  # Connect interactively
 
 Run `cloudcode` with no arguments for the full TUI experience."#
@@ -48,7 +48,7 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Create a new Claude Code session
+    /// Create a new AI coding session
     Spawn {
         /// Session name (auto-generated if omitted)
         name: Option<String>,
@@ -72,6 +72,11 @@ pub enum Command {
     Kill {
         /// Session name
         session: String,
+    },
+    /// Show or switch the AI provider (claude/codex)
+    Provider {
+        /// Provider to switch to (omit to show current)
+        provider: Option<String>,
     },
     /// Show VPS and session status
     Status,

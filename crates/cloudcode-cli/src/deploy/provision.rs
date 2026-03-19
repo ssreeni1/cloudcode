@@ -261,11 +261,14 @@ impl DeploymentContext {
             .hetzner
             .as_ref()
             .context("Hetzner not configured. Run /init or `cloudcode init` first.")?;
-        let claude_config = config
-            .claude
-            .as_ref()
-            .context("Claude not configured. Run /init or `cloudcode init` first.")?;
-        let _ = (hetzner_config, claude_config, no_wait);
+
+        // At least one AI provider (Claude or Codex) must be configured
+        if config.claude.is_none() && config.codex.is_none() {
+            anyhow::bail!(
+                "No AI provider configured. At least one of Claude or Codex must be set up. Run /init or `cloudcode init` first."
+            );
+        }
+        let _ = (hetzner_config, no_wait);
 
         let vps_config = config.vps.as_ref();
         let server_type = server_type_override
@@ -403,10 +406,7 @@ impl DeploymentContext {
             .to_string();
         let cloud_init = provisioner::generate_cloud_init(
             &ssh_pub_key,
-            self.config
-                .claude
-                .as_ref()
-                .context("Claude not configured")?,
+            self.config.claude.as_ref(),
         );
         let _ = &cloud_init;
         reporter.finish(
@@ -495,10 +495,7 @@ impl DeploymentContext {
         );
         let cloud_init = provisioner::generate_cloud_init(
             &ssh_pub_key,
-            self.config
-                .claude
-                .as_ref()
-                .context("Claude not configured")?,
+            self.config.claude.as_ref(),
         );
         let (server_id, server_ip) = match client
             .create_server(
@@ -846,7 +843,7 @@ impl DeploymentContext {
 
         println!("\n  {}", "Next steps:".bold());
         println!(
-            "    {}              # Create a Claude Code session",
+            "    {}              # Create a session",
             "/spawn".cyan().bold()
         );
         println!(
@@ -858,17 +855,28 @@ impl DeploymentContext {
             "(or use cloudcode spawn / cloudcode open <name> from CLI)".dimmed()
         );
 
-        if let Some(ref claude) = self.config.claude {
-            if matches!(claude.auth_method, AuthMethod::Oauth) {
-                println!(
-                    "\n  {}  {}",
-                    "!".yellow().bold(),
-                    "OAuth login required".yellow().bold()
-                );
-                println!(
-                    "    Run {} after spawning to log in.",
-                    "/open <name>".cyan().bold()
-                );
+        let claude_needs_oauth = self
+            .config
+            .claude
+            .as_ref()
+            .is_some_and(|c| matches!(c.auth_method, AuthMethod::Oauth));
+        let codex_needs_oauth = self
+            .config
+            .codex
+            .as_ref()
+            .is_some_and(|c| matches!(c.auth_method, AuthMethod::Oauth));
+
+        if claude_needs_oauth || codex_needs_oauth {
+            println!(
+                "\n  {}  {}",
+                "!".yellow().bold(),
+                "Login required".yellow().bold()
+            );
+            println!(
+                "    Run {} after spawning to log in.",
+                "/open <name>".cyan().bold()
+            );
+            if claude_needs_oauth {
                 println!(
                     "    Claude will show a login URL — {} to copy it.",
                     "highlight and copy the URL manually".bold()
@@ -877,14 +885,23 @@ impl DeploymentContext {
                     "    {}",
                     "(Pressing 'c' copies to the VPS clipboard, not your local machine.)".dimmed()
                 );
-                println!("    Open the URL in your local browser to complete the auth flow.");
-                if self.config.telegram.is_some() {
-                    println!(
-                        "\n  {}  {}",
-                        "!".yellow().bold(),
-                        "Telegram will not work until OAuth login is complete.".yellow()
-                    );
-                }
+            }
+            if codex_needs_oauth {
+                println!(
+                    "    Codex will use device-code auth — {} when prompted.",
+                    "select 'Device code'".bold()
+                );
+                println!(
+                    "    {}",
+                    "Visit the URL shown in your browser to authorize.".dimmed()
+                );
+            }
+            if self.config.telegram.is_some() {
+                println!(
+                    "\n  {}  {}",
+                    "!".yellow().bold(),
+                    "Telegram will not work until login is complete.".yellow()
+                );
             }
         }
 

@@ -144,7 +144,7 @@ pub fn trust_summary(compact: bool) -> TrustSummary {
         vec![
             TrustLine {
                 kind: LineKind::Muted,
-                text: "cloudcode provisions a personal VPS for persistent Claude sessions that you can reach from desktop or mobile.",
+                text: "cloudcode provisions a personal VPS for persistent AI coding sessions that you can reach from desktop or mobile.",
             },
             TrustLine {
                 kind: LineKind::Muted,
@@ -163,7 +163,7 @@ pub fn trust_summary(compact: bool) -> TrustSummary {
         vec![
             TrustLine {
                 kind: LineKind::Plain,
-                text: "cloudcode is an operator tool, not a sandbox. Its default goal is seamless setup for persistent remote Claude sessions reachable from desktop or mobile.",
+                text: "cloudcode is an operator tool, not a sandbox. Its default goal is seamless setup for persistent remote AI sessions reachable from desktop or mobile.",
             },
             TrustLine {
                 kind: LineKind::Plain,
@@ -171,7 +171,7 @@ pub fn trust_summary(compact: bool) -> TrustSummary {
             },
             TrustLine {
                 kind: LineKind::Plain,
-                text: "The provisioned VPS is configured for unattended remote operation, so the remote 'claude' user has elevated local control and Claude runs with bypass-permissions mode.",
+                text: "The provisioned VPS is configured for unattended remote operation, so the remote 'claude' user has elevated local control and AI agents run with full autonomy (bypass-permissions / full-auto).",
             },
             TrustLine {
                 kind: LineKind::Plain,
@@ -186,9 +186,9 @@ pub fn trust_summary(compact: bool) -> TrustSummary {
 pub fn security_guide() -> SecurityGuide {
     SecurityGuide {
         trust_model: vec![
-            "cloudcode is an operator tool, not a sandbox. Its default goal is seamless setup for persistent remote Claude sessions reachable from desktop or mobile.",
+            "cloudcode is an operator tool, not a sandbox. Its default goal is seamless setup for persistent remote AI sessions reachable from desktop or mobile.",
             "Your local machine stores keys, config, known_hosts, and state in ~/.cloudcode.",
-            "The provisioned VPS is configured for unattended remote operation, so the remote 'claude' user has elevated local control and Claude runs with bypass-permissions mode.",
+            "The provisioned VPS is configured for unattended remote operation, so the remote 'claude' user has elevated local control and AI agents run with full autonomy (bypass-permissions / full-auto).",
             "If Telegram is enabled, your Telegram chat effectively becomes a remote-control surface for that VPS.",
         ],
         revoke_rotate: vec![
@@ -244,8 +244,10 @@ mod tests {
                 api_key: Some("key".to_string()),
                 oauth_token: None,
             }),
+            codex: None,
             telegram: None,
             vps: None,
+            default_provider: None,
         };
         let state = VpsState {
             server_id: Some(42),

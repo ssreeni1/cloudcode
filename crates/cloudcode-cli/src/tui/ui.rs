@@ -58,7 +58,7 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("cloudcode", Style::default().fg(BLUE).bold()),
         ]),
         Line::from(Span::styled(
-            "         Persistent cloud Claude sessions",
+            "         Persistent cloud AI sessions",
             Style::default().fg(DIM),
         )),
         Line::from(""),
@@ -125,9 +125,13 @@ fn draw_step(f: &mut Frame, app: &App, area: Rect) {
 
     match app.step {
         WizardStep::Hetzner => draw_hetzner(f, app, layout[2]),
+        WizardStep::Provider => draw_provider(f, app, layout[2]),
         WizardStep::Claude => draw_claude(f, app, layout[2]),
         WizardStep::ClaudeApiKey => draw_claude_api_key(f, app, layout[2]),
         WizardStep::OAuthWarning => draw_oauth_warning(f, layout[2]),
+        WizardStep::Codex => draw_codex(f, app, layout[2]),
+        WizardStep::CodexApiKey => draw_codex_api_key(f, app, layout[2]),
+        WizardStep::CodexOAuthWarning => draw_codex_oauth_warning(f, layout[2]),
         WizardStep::Telegram => draw_telegram(f, app, layout[2]),
         WizardStep::Generating => draw_generating(f, app, layout[2]),
         _ => {}
@@ -188,9 +192,13 @@ fn draw_separator(f: &mut Frame, area: Rect) {
 fn draw_wizard_footer(f: &mut Frame, app: &App, area: Rect) {
     let help = match app.step {
         WizardStep::Hetzner => "Enter: submit  ·  Esc: back",
+        WizardStep::Provider => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
         WizardStep::Claude => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
         WizardStep::ClaudeApiKey => "Enter: submit  ·  Esc: back",
         WizardStep::OAuthWarning => "Enter: continue  ·  Esc: back",
+        WizardStep::Codex => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
+        WizardStep::CodexApiKey => "Enter: submit  ·  Esc: back",
+        WizardStep::CodexOAuthWarning => "Enter: continue  ·  Esc: back",
         WizardStep::Telegram => {
             if app.telegram_enabled {
                 "Tab: next field  ·  Enter: submit  ·  Esc: back"
@@ -279,6 +287,44 @@ fn draw_hetzner(f: &mut Frame, app: &App, area: Rect) {
     if cursor_y < area.y + area.height {
         f.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+fn draw_provider(f: &mut Frame, app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    let options = ["Claude (Anthropic)", "Codex (OpenAI)", "Both"];
+    let descs = [
+        "Claude Code — Anthropic's coding agent",
+        "Codex CLI — OpenAI's coding agent",
+        "Configure both, choose default later",
+    ];
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Which AI provider would you like to use?",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, (option, desc)) in options.iter().zip(descs.iter()).enumerate() {
+        let selected = i == app.provider_choice;
+        let marker = if selected { "● " } else { "○ " };
+        let prefix = if selected { "› " } else { "  " };
+        let style = if selected {
+            Style::default().fg(BLUE).bold()
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(marker, style),
+            Span::styled(*option, style),
+            Span::styled(format!(" — {}", desc), Style::default().fg(DIM)),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
 }
 
 fn draw_claude(f: &mut Frame, app: &App, area: Rect) {
@@ -413,6 +459,84 @@ fn draw_oauth_warning(f: &mut Frame, area: Rect) {
             "Telegram will not work until you complete this login.",
             Style::default().fg(YELLOW),
         )),
+    ];
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
+}
+
+fn draw_codex(f: &mut Frame, app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    let api_marker = if app.codex_auth_choice == 0 { "● " } else { "○ " };
+    let oauth_marker = if app.codex_auth_choice == 1 { "● " } else { "○ " };
+    let api_style = if app.codex_auth_choice == 0 { Style::default().fg(BLUE).bold() } else { Style::default().fg(Color::White) };
+    let oauth_style = if app.codex_auth_choice == 1 { Style::default().fg(BLUE).bold() } else { Style::default().fg(Color::White) };
+    let api_prefix = if app.codex_auth_choice == 0 { "› " } else { "  " };
+    let oauth_prefix = if app.codex_auth_choice == 1 { "› " } else { "  " };
+
+    let lines = vec![
+        Line::from(Span::styled("How would you like to authenticate with Codex?", Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(api_prefix, api_style),
+            Span::styled(api_marker, api_style),
+            Span::styled("API Key", api_style),
+            Span::styled(" — paste from platform.openai.com", Style::default().fg(DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled(oauth_prefix, oauth_style),
+            Span::styled(oauth_marker, oauth_style),
+            Span::styled("Device Auth", oauth_style),
+            Span::styled(" — log in on VPS via device code", Style::default().fg(DIM)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
+}
+
+fn draw_codex_api_key(f: &mut Frame, app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    let input_value = app.codex_api_key_input.value();
+    let masked: String = "*".repeat(input_value.len());
+    let cursor_pos = app.codex_api_key_input.visual_cursor();
+
+    let lines = vec![
+        Line::from(Span::styled("Enter your OpenAI API key:", Style::default().fg(Color::White))),
+        Line::from(Span::styled("Get one at platform.openai.com/api-keys", Style::default().fg(DIM))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("API Key: ", Style::default().fg(Color::White).bold()),
+            Span::styled(&masked, Style::default().fg(Color::White)),
+            Span::styled("▌", Style::default().fg(BLUE)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
+
+    let cursor_x = body.x + "API Key: ".len() as u16 + cursor_pos as u16;
+    let cursor_y = body.y + 3;
+    if cursor_y < area.y + area.height {
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn draw_codex_oauth_warning(f: &mut Frame, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    let lines = vec![
+        Line::from(Span::styled("⚠  After provisioning, you'll need to log in", Style::default().fg(YELLOW))),
+        Line::from(Span::styled("to Codex from the CLI:", Style::default().fg(YELLOW))),
+        Line::from(""),
+        Line::from(Span::styled("1. /spawn (or cloudcode spawn)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("2. /open <session> (or cloudcode open <session>)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("3. Select 'Device code' when Codex prompts", Style::default().fg(Color::White))),
+        Line::from(Span::styled("4. Visit the URL in your local browser to authorize", Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(Span::styled("⚠  Do NOT use the browser/localhost option", Style::default().fg(YELLOW).bold())),
+        Line::from(Span::styled("   (it redirects to localhost which won't work on the VPS)", Style::default().fg(YELLOW))),
+        Line::from(""),
+        Line::from(Span::styled("Telegram will not work until you complete this login.", Style::default().fg(YELLOW))),
     ];
 
     f.render_widget(Paragraph::new(Text::from(lines)), body);
@@ -1003,7 +1127,7 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
         (
             "  /spawn",
             " [name]",
-            "Create a Claude session",
+            "Create a session",
             "cloudcode spawn",
         ),
         ("  /list", "", "List active sessions", "cloudcode list"),
@@ -1027,6 +1151,12 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
         ),
         ("", "", "", ""),
         ("System", "", "", ""),
+        (
+            "  /provider",
+            " [name]",
+            "Show/switch provider",
+            "cloudcode provider",
+        ),
         (
             "  /restart",
             "",

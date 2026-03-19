@@ -5,6 +5,7 @@ pub mod init;
 pub mod kill;
 pub mod list;
 pub mod logs;
+pub mod provider;
 pub mod restart;
 pub mod security;
 pub mod security_report;

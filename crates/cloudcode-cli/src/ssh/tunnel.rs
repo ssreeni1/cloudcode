@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
+use std::io::Read;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -28,13 +29,42 @@ impl DaemonClient {
 
         // Build SSH args — deliberately bypass ControlMaster so the -L
         // forwarding runs on a dedicated connection.
-        let mut args = ssh_base_args(ip)?;
+        // IMPORTANT: SSH uses first-match-wins for -o options, so we must
+        // filter out ControlMaster/ControlPath/ControlPersist from base args
+        // rather than appending overrides (which would be ignored).
+        let base_args = ssh_base_args(ip)?;
+        let mut args: Vec<String> = Vec::new();
+        let mut skip_next = false;
+        for (i, arg) in base_args.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "-o" {
+                if let Some(next) = base_args.get(i + 1) {
+                    if next.starts_with("ControlMaster=")
+                        || next.starts_with("ControlPath=")
+                        || next.starts_with("ControlPersist=")
+                    {
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
+            args.push(arg.clone());
+        }
         args.extend([
             "-o".to_string(),
             "ControlMaster=no".to_string(),
+            "-o".to_string(),
+            "ControlPath=none".to_string(),
+            "-o".to_string(),
+            "ControlPersist=no".to_string(),
             "-N".to_string(), // no remote command
             "-o".to_string(),
             "ExitOnForwardFailure=yes".to_string(),
+            "-o".to_string(),
+            "StreamLocalBindUnlink=yes".to_string(),
             "-L".to_string(),
             format!("{}:127.0.0.1:7700", socket_path.display()),
             format!("claude@{}", ip),
@@ -44,11 +74,11 @@ impl DaemonClient {
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("Failed to start SSH tunnel")?;
 
-        let client = Self {
+        let mut client = Self {
             tunnel: Some(tunnel),
             socket_path,
         };
@@ -60,7 +90,7 @@ impl DaemonClient {
     }
 
     /// Poll until the Unix socket is connectable
-    fn wait_for_ready(&self) -> Result<()> {
+    fn wait_for_ready(&mut self) -> Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(10);
         let interval = Duration::from_millis(100);
@@ -68,6 +98,21 @@ impl DaemonClient {
         loop {
             if UnixStream::connect(&self.socket_path).is_ok() {
                 return Ok(());
+            }
+
+            if let Some(ref mut child) = self.tunnel {
+                if let Ok(Some(status)) = child.try_wait() {
+                    let mut stderr = String::new();
+                    if let Some(mut pipe) = child.stderr.take() {
+                        let _ = pipe.read_to_string(&mut stderr);
+                    }
+                    let stderr = stderr.trim();
+                    if stderr.is_empty() {
+                        bail!("SSH tunnel exited early with status {}", status);
+                    } else {
+                        bail!("SSH tunnel exited early: {}", stderr);
+                    }
+                }
             }
 
             if start.elapsed() > timeout {

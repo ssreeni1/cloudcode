@@ -4,7 +4,7 @@ use crate::config::{ClaudeConfig, Config};
 use crate::hetzner::client::HetznerClient;
 use crate::state::VpsState;
 
-pub fn generate_cloud_init(ssh_pub_key: &str, _claude_auth: &ClaudeConfig) -> String {
+pub fn generate_cloud_init(ssh_pub_key: &str, _claude_auth: Option<&ClaudeConfig>) -> String {
     format!(
         r##"#cloud-config
 users:
@@ -56,6 +56,37 @@ write_files:
       echo '{{"status":"failed","error":"Playwright browser install failed after 3 attempts. Check /var/log/cloudcode-playwright.log"}}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
+  - path: /opt/cloudcode-codex-setup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      exec > /var/log/cloudcode-codex.log 2>&1
+      set -euo pipefail
+
+      STATUS_FILE=/home/claude/.cloudcode/codex-status.json
+
+      mkdir -p /home/claude/.cloudcode
+      chown -R claude:claude /home/claude/.cloudcode
+
+      echo '{{"status":"installing"}}' > "$STATUS_FILE"
+      chown claude:claude "$STATUS_FILE"
+      chmod 0600 "$STATUS_FILE"
+
+      for attempt in 1 2 3; do
+        echo "Codex install attempt $attempt..."
+        if timeout 15m npm install -g @openai/codex && command -v codex >/dev/null 2>&1; then
+          echo '{{"status":"ready"}}' > "$STATUS_FILE"
+          chown claude:claude "$STATUS_FILE"
+          chmod 0600 "$STATUS_FILE"
+          exit 0
+        fi
+        echo "Codex attempt $attempt failed, waiting 15s..."
+        sleep 15
+      done
+
+      echo '{{"status":"failed","error":"Codex CLI install failed after 3 attempts. Check /var/log/cloudcode-codex.log"}}' > "$STATUS_FILE"
+      chown claude:claude "$STATUS_FILE"
+      chmod 0600 "$STATUS_FILE"
   - path: /opt/cloudcode-setup.sh
     permissions: '0755'
     content: |
@@ -65,11 +96,11 @@ write_files:
 
       echo "=== cloudcode setup started at $(date) ==="
 
-      # Install Claude Code with retries
+      # Install Claude Code via npm (global install as root)
       CLAUDE_INSTALLED=false
       for attempt in 1 2 3; do
         echo "Claude Code install attempt $attempt..."
-        if su - claude -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
+        if /usr/bin/npm install -g @anthropic-ai/claude-code; then
           CLAUDE_INSTALLED=true
           break
         fi
@@ -83,11 +114,11 @@ write_files:
         exit 1
       fi
 
-      # Add ~/.local/bin to PATH for claude user (where Claude Code installs)
-      su - claude -c 'echo '\''export PATH="$HOME/.local/bin:$PATH"'\'' >> ~/.bashrc'
+      # Add ~/.local/bin and npm global bin to PATH for claude user
+      su - claude -c 'echo '\''export PATH="$HOME/.local/bin:$(npm config get prefix 2>/dev/null)/bin:$PATH"'\'' >> ~/.bashrc'
 
       # Verify claude is available
-      if ! su - claude -c 'export PATH="$HOME/.local/bin:$PATH" && which claude'; then
+      if ! su - claude -c 'export PATH="$HOME/.local/bin:$(npm config get prefix 2>/dev/null)/bin:$PATH" && which claude'; then
         echo '{{"status":"error","error":"claude binary not found after install"}}' > /home/claude/.cloudcode-status.json
         chown claude:claude /home/claude/.cloudcode-status.json
         exit 1
@@ -107,9 +138,15 @@ write_files:
       echo '{{"status":"pending"}}' > /home/claude/.cloudcode/playwright-status.json
       chown claude:claude /home/claude/.cloudcode/playwright-status.json
       chmod 0600 /home/claude/.cloudcode/playwright-status.json
+      echo '{{"status":"pending"}}' > /home/claude/.cloudcode/codex-status.json
+      chown claude:claude /home/claude/.cloudcode/codex-status.json
+      chmod 0600 /home/claude/.cloudcode/codex-status.json
 
       # Browser automation is non-blocking for first-use readiness. Install it in the background.
       nohup /opt/cloudcode-playwright-setup.sh >/dev/null 2>&1 &
+
+      # Codex CLI install is also non-blocking for first-use readiness.
+      nohup /opt/cloudcode-codex-setup.sh >/dev/null 2>&1 &
 
       echo "=== cloudcode setup completed at $(date) ==="
 
@@ -140,7 +177,7 @@ mod tests {
 
     #[test]
     fn cloud_init_runcmd_chown_home_before_setup_script() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         // Find the runcmd section specifically
         let runcmd_section = output.split("runcmd:").last().unwrap();
         let chown_pos = runcmd_section
@@ -158,13 +195,13 @@ mod tests {
     #[test]
     fn cloud_init_contains_ssh_pub_key() {
         let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 user@host";
-        let output = generate_cloud_init(key, &dummy_claude_config());
+        let output = generate_cloud_init(key, Some(&dummy_claude_config()));
         assert!(output.contains(key));
     }
 
     #[test]
     fn cloud_init_installs_required_packages() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("- tmux"));
         assert!(output.contains("- curl"));
         assert!(output.contains("- git"));
@@ -175,7 +212,7 @@ mod tests {
 
     #[test]
     fn cloud_init_creates_claude_user_with_sudo() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("name: claude"));
         assert!(output.contains("groups: sudo"));
         assert!(output.contains("NOPASSWD:ALL"));
@@ -183,7 +220,7 @@ mod tests {
 
     #[test]
     fn cloud_init_setup_script_sets_up_ufw() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_claude_config());
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("ufw default deny incoming"));
         assert!(output.contains("ufw allow 22/tcp"));
     }

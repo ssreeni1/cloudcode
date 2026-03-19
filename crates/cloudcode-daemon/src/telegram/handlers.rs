@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cloudcode_common::provider::AiProvider;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, ParseMode};
 
@@ -17,6 +18,7 @@ const HELP_TEXT: &str = "🤖 *cloudcode Telegram Bot*\n\n\
     /list — List active sessions\n\
     /kill \\<name\\> — Kill a session\n\
     /use \\<name\\> — Set default session\n\
+    /provider \\[claude\\|codex\\] — Check or switch AI provider\n\
     /waiting — List sessions waiting for input\n\
     /reply \\[session\\] \\<text\\> — Reply to a waiting session\n\
     /context \\[session\\] — View session context\n\
@@ -61,6 +63,7 @@ async fn handle_command(
         "/kill" => handle_kill(bot, msg, state, args).await?,
         "/use" => handle_use(bot, msg, state, args).await?,
         "/status" => handle_status(bot, msg, state).await?,
+        "/provider" => handle_provider(bot, msg, state, args).await?,
         "/waiting" => handle_waiting(bot, msg, state).await?,
         "/reply" => handle_reply(bot, msg, state, args).await?,
         "/context" => handle_context(bot, msg, state, args).await?,
@@ -264,6 +267,143 @@ async fn handle_use(
     }
 
     Ok(())
+}
+
+async fn handle_provider(
+    bot: &Bot,
+    msg: &Message,
+    state: &Arc<BotState>,
+    args: &str,
+) -> ResponseResult<()> {
+    if args.is_empty() {
+        let current = state.session_mgr.current_provider();
+        let claude_status = provider_status(AiProvider::Claude);
+        let codex_status = provider_status(AiProvider::Codex);
+        let text = format!(
+            "🤖 Current provider: {}\n\n\
+             Claude: {}\n\
+             Codex: {}\n\n\
+             Use /provider claude or /provider codex to switch.",
+            current.display_name(),
+            claude_status.summary,
+            codex_status.summary,
+        );
+        bot.send_message(msg.chat.id, text).await?;
+    } else {
+        let target: AiProvider = match args.parse() {
+            Ok(p) => p,
+            Err(_) => {
+                bot.send_message(
+                    msg.chat.id,
+                    "Unknown provider. Use /provider claude or /provider codex",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
+        let status = provider_status(target);
+        if !status.switchable {
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "❌ Cannot switch to {}: {}.\nRun `cloudcode init --reauth` to configure.",
+                    target.display_name(),
+                    status.reason
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        state.session_mgr.set_provider(target);
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "✅ Switched to {}. New sessions will use this provider.",
+                target.display_name()
+            ),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+struct ProviderStatus {
+    summary: &'static str,
+    reason: &'static str,
+    switchable: bool,
+}
+
+fn provider_status(provider: AiProvider) -> ProviderStatus {
+    match provider {
+        AiProvider::Claude => {
+            let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
+            let has_oauth = std::path::Path::new("/home/claude/.claude/credentials.json").exists();
+            match (has_api_key, has_oauth) {
+                (true, _) | (_, true) => ProviderStatus {
+                    summary: "✅ ready",
+                    reason: "configured",
+                    switchable: true,
+                },
+                (false, false) => ProviderStatus {
+                    summary: "❌ not configured",
+                    reason: "ANTHROPIC_API_KEY not set and Claude OAuth login not completed",
+                    switchable: false,
+                },
+            }
+        }
+        AiProvider::Codex => {
+            let binary_exists = std::path::Path::new("/usr/local/bin/codex").exists();
+            let has_api_key = std::env::var("OPENAI_API_KEY").is_ok();
+            let has_oauth = std::path::Path::new("/home/claude/.codex/auth.json").exists();
+            let install_status =
+                std::fs::read_to_string("/home/claude/.cloudcode/codex-status.json")
+                    .unwrap_or_default();
+
+            if install_status.contains("\"pending\"") || install_status.contains("\"installing\"") {
+                return ProviderStatus {
+                    summary: "⏳ installing",
+                    reason: "Codex CLI install is still in progress",
+                    switchable: false,
+                };
+            }
+
+            if install_status.contains("\"failed\"") || !binary_exists {
+                return ProviderStatus {
+                    summary: "❌ not installed",
+                    reason: "Codex CLI is not installed on the VPS yet",
+                    switchable: false,
+                };
+            }
+
+            if has_api_key || has_oauth {
+                return ProviderStatus {
+                    summary: "✅ ready",
+                    reason: "configured",
+                    switchable: true,
+                };
+            }
+
+            let auth_method = std::fs::read_to_string("/home/claude/.cloudcode/codex-auth-method")
+                .unwrap_or_default();
+            let (summary, reason) = if auth_method.trim() == "oauth" {
+                (
+                    "⚠️ login required",
+                    "Codex OAuth login has not been completed yet",
+                )
+            } else {
+                ("❌ not configured", "OPENAI_API_KEY not set")
+            };
+
+            ProviderStatus {
+                summary,
+                reason,
+                switchable: false,
+            }
+        }
+    }
 }
 
 async fn handle_status(bot: &Bot, msg: &Message, state: &Arc<BotState>) -> ResponseResult<()> {
@@ -532,7 +672,33 @@ async fn handle_free_text(
         }
     });
 
-    let send_result = state.session_mgr.send(&session_name, text).await;
+    // Retry transient execution errors (rate limits, network blips) up to 3 times.
+    // Keep the typing indicator alive between retries.
+    let mut send_result = Err(anyhow::anyhow!("not started"));
+    for attempt in 0..3 {
+        send_result = state.session_mgr.send(&session_name, text).await;
+        match &send_result {
+            Ok(_) => break,
+            Err(err) => {
+                let err_str = err.to_string();
+                // Don't retry non-transient errors
+                if is_oauth_error(err)
+                    || err_str.contains("does not exist")
+                    || err_str.contains("timed out")
+                {
+                    break;
+                }
+                if attempt < 2 {
+                    log::warn!(
+                        "Send attempt {} failed ({}), retrying in 5s...",
+                        attempt + 1,
+                        err_str
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
     typing_handle.abort();
 
     match send_result {

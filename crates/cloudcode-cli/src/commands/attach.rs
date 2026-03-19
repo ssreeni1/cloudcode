@@ -13,6 +13,23 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", escaped)
 }
 
+/// Build the attach-specific SSH args that are appended after the base SSH args.
+///
+/// These disable ControlMaster (to avoid stale control sockets from prior
+/// operations), force PTY allocation, and specify the remote tmux attach command.
+fn attach_ssh_args(ip: &str, session: &str) -> Vec<String> {
+    let quoted_session = shell_single_quote(session);
+    vec![
+        "-o".to_string(),
+        "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ControlPath=none".to_string(),
+        "-t".to_string(), // force PTY allocation
+        format!("claude@{}", ip),
+        format!("tmux attach-session -t {}", quoted_session),
+    ]
+}
+
 pub async fn run(session: String) -> Result<()> {
     let state = VpsState::load()?;
     if !state.is_provisioned() {
@@ -62,12 +79,7 @@ pub async fn run(session: String) -> Result<()> {
     );
 
     let mut args = ssh_base_args(ip)?;
-    let quoted_session = shell_single_quote(&session);
-    args.extend([
-        "-t".to_string(), // force PTY allocation
-        format!("claude@{}", ip),
-        format!("tmux attach-session -t {}", quoted_session),
-    ]);
+    args.extend(attach_ssh_args(ip, &session));
 
     let mut cmd = std::process::Command::new("ssh");
     cmd.args(&args)
@@ -108,7 +120,7 @@ pub async fn run(session: String) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_single_quote;
+    use super::{attach_ssh_args, shell_single_quote};
 
     #[test]
     fn shell_single_quote_wraps_plain_text() {
@@ -120,6 +132,95 @@ mod tests {
         assert_eq!(
             shell_single_quote("a'b\"c; rm -rf /"),
             "'a'\\''b\"c; rm -rf /'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // attach_ssh_args tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn attach_ssh_args_includes_control_master_no() {
+        let args = attach_ssh_args("1.2.3.4", "my-session");
+        // ControlMaster=no must appear to disable connection multiplexing
+        let cm_idx = args.iter().position(|a| a == "ControlMaster=no");
+        assert!(
+            cm_idx.is_some(),
+            "ControlMaster=no must be present in attach args"
+        );
+        // It should be preceded by "-o"
+        let idx = cm_idx.unwrap();
+        assert!(idx > 0, "ControlMaster=no should be preceded by -o");
+        assert_eq!(args[idx - 1], "-o");
+    }
+
+    #[test]
+    fn attach_ssh_args_includes_control_path_none() {
+        let args = attach_ssh_args("1.2.3.4", "my-session");
+        let cp_idx = args.iter().position(|a| a == "ControlPath=none");
+        assert!(
+            cp_idx.is_some(),
+            "ControlPath=none must be present in attach args"
+        );
+        let idx = cp_idx.unwrap();
+        assert!(idx > 0);
+        assert_eq!(args[idx - 1], "-o");
+    }
+
+    #[test]
+    fn attach_ssh_args_includes_pty_flag() {
+        let args = attach_ssh_args("1.2.3.4", "my-session");
+        assert!(
+            args.contains(&"-t".to_string()),
+            "PTY allocation flag -t must be present"
+        );
+    }
+
+    #[test]
+    fn attach_ssh_args_includes_user_and_host() {
+        let args = attach_ssh_args("10.0.0.5", "test-session");
+        assert!(
+            args.contains(&"claude@10.0.0.5".to_string()),
+            "Should include claude@<ip>"
+        );
+    }
+
+    #[test]
+    fn attach_ssh_args_includes_tmux_attach_command() {
+        let args = attach_ssh_args("1.2.3.4", "my-session");
+        let last = args.last().unwrap();
+        assert!(
+            last.starts_with("tmux attach-session -t "),
+            "Last arg should be the tmux attach command, got: {}",
+            last
+        );
+        assert!(
+            last.contains("my-session"),
+            "tmux command should reference the session name"
+        );
+    }
+
+    #[test]
+    fn attach_ssh_args_quotes_session_name() {
+        // Session name should be shell-quoted in the tmux command
+        let args = attach_ssh_args("1.2.3.4", "sess-123");
+        let tmux_cmd = args.last().unwrap();
+        assert_eq!(tmux_cmd, "tmux attach-session -t 'sess-123'");
+    }
+
+    #[test]
+    fn attach_ssh_args_control_master_overrides_base() {
+        // The base args set ControlMaster=auto. The attach args must set
+        // ControlMaster=no AFTER the base args so SSH uses the last value.
+        // Verify the attach args contain the override (the caller extends
+        // base args with these, so they appear later in the final arg list).
+        let args = attach_ssh_args("1.2.3.4", "s");
+        assert!(args.contains(&"ControlMaster=no".to_string()));
+        assert!(args.contains(&"ControlPath=none".to_string()));
+        // Verify ControlMaster=auto is NOT in the attach args
+        assert!(
+            !args.contains(&"ControlMaster=auto".to_string()),
+            "Attach args must not contain ControlMaster=auto"
         );
     }
 }

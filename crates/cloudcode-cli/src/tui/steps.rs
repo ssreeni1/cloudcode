@@ -3,9 +3,13 @@
 pub enum WizardStep {
     Welcome,
     Hetzner,
+    Provider,
     Claude,
     ClaudeApiKey,
     OAuthWarning,
+    Codex,
+    CodexApiKey,
+    CodexOAuthWarning,
     Telegram,
     Generating,
     Complete,
@@ -14,7 +18,7 @@ pub enum WizardStep {
 impl WizardStep {
     /// The total number of visible steps (used for progress display).
     pub fn total_steps() -> usize {
-        4
+        5
     }
 
     /// The current step number (1-indexed) for the progress indicator.
@@ -22,9 +26,11 @@ impl WizardStep {
         match self {
             Self::Welcome => None,
             Self::Hetzner => Some(1),
-            Self::Claude | Self::ClaudeApiKey | Self::OAuthWarning => Some(2),
-            Self::Telegram => Some(3),
-            Self::Generating => Some(4),
+            Self::Provider => Some(2),
+            Self::Claude | Self::ClaudeApiKey | Self::OAuthWarning => Some(3),
+            Self::Codex | Self::CodexApiKey | Self::CodexOAuthWarning => Some(3),
+            Self::Telegram => Some(4),
+            Self::Generating => Some(5),
             Self::Complete => None,
         }
     }
@@ -34,9 +40,13 @@ impl WizardStep {
         match self {
             Self::Welcome => "Welcome",
             Self::Hetzner => "Hetzner Cloud",
+            Self::Provider => "AI Provider",
             Self::Claude => "Claude Authentication",
             Self::ClaudeApiKey => "Claude API Key",
             Self::OAuthWarning => "OAuth Setup Guide",
+            Self::Codex => "Codex Authentication",
+            Self::CodexApiKey => "Codex API Key",
+            Self::CodexOAuthWarning => "Codex OAuth Guide",
             Self::Telegram => "Telegram (optional)",
             Self::Generating => "Setup",
             Self::Complete => "Complete",

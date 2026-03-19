@@ -1,6 +1,7 @@
 use crate::session::manager::SessionManager;
 use crate::session::monitor::SessionMonitor;
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static START_TIME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -14,7 +15,7 @@ pub fn init_start_time() {
     });
 }
 
-pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonResponse {
+pub async fn handle(request: DaemonRequest, mgr: &Arc<SessionManager>) -> DaemonResponse {
     match request {
         DaemonRequest::Spawn { name } => match mgr.spawn(name).await {
             Ok(session) => DaemonResponse::Spawned { session },
@@ -48,7 +49,7 @@ pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonRespo
             },
         },
         DaemonRequest::Cleanup => {
-            let monitor = SessionMonitor::new(SessionManager::new());
+            let monitor = SessionMonitor::new(Arc::clone(mgr));
             match monitor.cleanup_dead().await {
                 Ok(sessions) => DaemonResponse::CleanedUp { sessions },
                 Err(e) => DaemonResponse::Error {
@@ -79,6 +80,7 @@ pub async fn handle(request: DaemonRequest, mgr: &SessionManager) -> DaemonRespo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloudcode_common::provider::AiProvider;
 
     // -----------------------------------------------------------------------
     // init_start_time
@@ -100,7 +102,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_spawn_returns_error_when_tmux_unavailable() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Spawn {
             name: Some("test-session".to_string()),
         };
@@ -123,7 +125,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_list_returns_sessions_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::List;
         let resp = handle(req, &mgr).await;
 
@@ -142,7 +144,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_kill_nonexistent_session_returns_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Kill {
             session: "nonexistent-session-xyz-12345".to_string(),
         };
@@ -163,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_send_nonexistent_session_returns_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Send {
             session: "nonexistent-session-xyz-12345".to_string(),
             message: "hello".to_string(),
@@ -180,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_status_returns_status_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         // Ensure START_TIME is initialized so uptime calculation works
         init_start_time();
 
@@ -211,7 +213,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_spawn_response_type_is_spawned_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Spawn { name: None };
         let resp = handle(req, &mgr).await;
         let json = serde_json::to_string(&resp).unwrap();
@@ -227,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_list_response_type_is_sessions_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::List;
         let resp = handle(req, &mgr).await;
         let json = serde_json::to_string(&resp).unwrap();
@@ -243,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_kill_response_type_is_killed_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Kill {
             session: "x".to_string(),
         };
@@ -261,7 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_send_response_type_is_send_result_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         let req = DaemonRequest::Send {
             session: "x".to_string(),
             message: "hi".to_string(),
@@ -280,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_status_response_type_is_status_or_error() {
-        let mgr = SessionManager::new();
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
         init_start_time();
         let req = DaemonRequest::Status;
         let resp = handle(req, &mgr).await;
