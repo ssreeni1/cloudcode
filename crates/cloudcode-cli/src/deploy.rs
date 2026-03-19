@@ -101,10 +101,7 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
     let check = std::process::Command::new("ssh")
         .args(ssh_command_args(
             ip,
-            &format!(
-                "{}; command -v cargo >/dev/null 2>&1",
-                cargo_env_snippet()
-            ),
+            &format!("{}; command -v cargo >/dev/null 2>&1", cargo_env_snippet()),
         )?)
         .output()
         .context("Failed to check for Rust on VPS")?;
@@ -121,7 +118,11 @@ fn remote_build_daemon(target: &str) -> Result<PathBuf> {
         if !install.status.success() {
             let stderr = String::from_utf8_lossy(&install.stderr);
             let stdout = String::from_utf8_lossy(&install.stdout);
-            anyhow::bail!("Failed to install Rust toolchain on VPS:\n{}\n{}", stdout, stderr);
+            anyhow::bail!(
+                "Failed to install Rust toolchain on VPS:\n{}\n{}",
+                stdout,
+                stderr
+            );
         }
     }
 

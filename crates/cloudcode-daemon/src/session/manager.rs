@@ -9,7 +9,7 @@ use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Output from a send operation, including text and any files created.
 pub struct SendOutput {
@@ -499,7 +499,6 @@ impl SessionManager {
         };
         let _guard = lock.lock().await;
 
-        let home = daemon_home_dir().to_string_lossy().to_string();
         let workdir = session_runtime_workdir(session).await?;
         let provider = self.session_provider(session);
 
@@ -910,10 +909,7 @@ mod tests {
     #[test]
     fn strip_ansi_codes_256_color() {
         // 256-color foreground: ESC[38;5;196m
-        assert_eq!(
-            strip_ansi_codes("\x1b[38;5;196mcolored\x1b[0m"),
-            "colored"
-        );
+        assert_eq!(strip_ansi_codes("\x1b[38;5;196mcolored\x1b[0m"), "colored");
     }
 
     #[test]
@@ -943,10 +939,7 @@ mod tests {
     #[test]
     fn strip_ansi_codes_multiple_codes_in_sequence() {
         // Bold + red + text + reset
-        assert_eq!(
-            strip_ansi_codes("\x1b[1m\x1b[31mhello\x1b[0m"),
-            "hello"
-        );
+        assert_eq!(strip_ansi_codes("\x1b[1m\x1b[31mhello\x1b[0m"), "hello");
     }
 
     #[test]
@@ -958,10 +951,7 @@ mod tests {
     #[test]
     fn strip_ansi_codes_combined_sgr_parameters() {
         // ESC[1;31;4m = bold + red + underline
-        assert_eq!(
-            strip_ansi_codes("\x1b[1;31;4mstyled\x1b[0m"),
-            "styled"
-        );
+        assert_eq!(strip_ansi_codes("\x1b[1;31;4mstyled\x1b[0m"), "styled");
     }
 
     #[test]

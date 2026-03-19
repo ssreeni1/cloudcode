@@ -404,10 +404,8 @@ impl DeploymentContext {
             .context("Failed to read SSH public key")?
             .trim()
             .to_string();
-        let cloud_init = provisioner::generate_cloud_init(
-            &ssh_pub_key,
-            self.config.claude.as_ref(),
-        );
+        let cloud_init =
+            provisioner::generate_cloud_init(&ssh_pub_key, self.config.claude.as_ref());
         let _ = &cloud_init;
         reporter.finish(
             &pb,
@@ -493,10 +491,8 @@ impl DeploymentContext {
                 .api_token
                 .clone(),
         );
-        let cloud_init = provisioner::generate_cloud_init(
-            &ssh_pub_key,
-            self.config.claude.as_ref(),
-        );
+        let cloud_init =
+            provisioner::generate_cloud_init(&ssh_pub_key, self.config.claude.as_ref());
         let (server_id, server_ip) = match client
             .create_server(
                 "cloudcode",

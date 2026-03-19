@@ -467,21 +467,51 @@ fn draw_oauth_warning(f: &mut Frame, area: Rect) {
 fn draw_codex(f: &mut Frame, app: &App, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
-    let api_marker = if app.codex_auth_choice == 0 { "● " } else { "○ " };
-    let oauth_marker = if app.codex_auth_choice == 1 { "● " } else { "○ " };
-    let api_style = if app.codex_auth_choice == 0 { Style::default().fg(BLUE).bold() } else { Style::default().fg(Color::White) };
-    let oauth_style = if app.codex_auth_choice == 1 { Style::default().fg(BLUE).bold() } else { Style::default().fg(Color::White) };
-    let api_prefix = if app.codex_auth_choice == 0 { "› " } else { "  " };
-    let oauth_prefix = if app.codex_auth_choice == 1 { "› " } else { "  " };
+    let api_marker = if app.codex_auth_choice == 0 {
+        "● "
+    } else {
+        "○ "
+    };
+    let oauth_marker = if app.codex_auth_choice == 1 {
+        "● "
+    } else {
+        "○ "
+    };
+    let api_style = if app.codex_auth_choice == 0 {
+        Style::default().fg(BLUE).bold()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let oauth_style = if app.codex_auth_choice == 1 {
+        Style::default().fg(BLUE).bold()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let api_prefix = if app.codex_auth_choice == 0 {
+        "› "
+    } else {
+        "  "
+    };
+    let oauth_prefix = if app.codex_auth_choice == 1 {
+        "› "
+    } else {
+        "  "
+    };
 
     let lines = vec![
-        Line::from(Span::styled("How would you like to authenticate with Codex?", Style::default().fg(Color::White))),
+        Line::from(Span::styled(
+            "How would you like to authenticate with Codex?",
+            Style::default().fg(Color::White),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(api_prefix, api_style),
             Span::styled(api_marker, api_style),
             Span::styled("API Key", api_style),
-            Span::styled(" — paste from platform.openai.com", Style::default().fg(DIM)),
+            Span::styled(
+                " — paste from platform.openai.com",
+                Style::default().fg(DIM),
+            ),
         ]),
         Line::from(vec![
             Span::styled(oauth_prefix, oauth_style),
@@ -502,8 +532,14 @@ fn draw_codex_api_key(f: &mut Frame, app: &App, area: Rect) {
     let cursor_pos = app.codex_api_key_input.visual_cursor();
 
     let lines = vec![
-        Line::from(Span::styled("Enter your OpenAI API key:", Style::default().fg(Color::White))),
-        Line::from(Span::styled("Get one at platform.openai.com/api-keys", Style::default().fg(DIM))),
+        Line::from(Span::styled(
+            "Enter your OpenAI API key:",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "Get one at platform.openai.com/api-keys",
+            Style::default().fg(DIM),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("API Key: ", Style::default().fg(Color::White).bold()),
@@ -525,18 +561,45 @@ fn draw_codex_oauth_warning(f: &mut Frame, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
     let lines = vec![
-        Line::from(Span::styled("⚠  After provisioning, you'll need to log in", Style::default().fg(YELLOW))),
-        Line::from(Span::styled("to Codex from the CLI:", Style::default().fg(YELLOW))),
+        Line::from(Span::styled(
+            "⚠  After provisioning, you'll need to log in",
+            Style::default().fg(YELLOW),
+        )),
+        Line::from(Span::styled(
+            "to Codex from the CLI:",
+            Style::default().fg(YELLOW),
+        )),
         Line::from(""),
-        Line::from(Span::styled("1. /spawn (or cloudcode spawn)", Style::default().fg(Color::White))),
-        Line::from(Span::styled("2. /open <session> (or cloudcode open <session>)", Style::default().fg(Color::White))),
-        Line::from(Span::styled("3. Select 'Device code' when Codex prompts", Style::default().fg(Color::White))),
-        Line::from(Span::styled("4. Visit the URL in your local browser to authorize", Style::default().fg(Color::White))),
+        Line::from(Span::styled(
+            "1. /spawn (or cloudcode spawn)",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "2. /open <session> (or cloudcode open <session>)",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "3. Select 'Device code' when Codex prompts",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "4. Visit the URL in your local browser to authorize",
+            Style::default().fg(Color::White),
+        )),
         Line::from(""),
-        Line::from(Span::styled("⚠  Do NOT use the browser/localhost option", Style::default().fg(YELLOW).bold())),
-        Line::from(Span::styled("   (it redirects to localhost which won't work on the VPS)", Style::default().fg(YELLOW))),
+        Line::from(Span::styled(
+            "⚠  Do NOT use the browser/localhost option",
+            Style::default().fg(YELLOW).bold(),
+        )),
+        Line::from(Span::styled(
+            "   (it redirects to localhost which won't work on the VPS)",
+            Style::default().fg(YELLOW),
+        )),
         Line::from(""),
-        Line::from(Span::styled("Telegram will not work until you complete this login.", Style::default().fg(YELLOW))),
+        Line::from(Span::styled(
+            "Telegram will not work until you complete this login.",
+            Style::default().fg(YELLOW),
+        )),
     ];
 
     f.render_widget(Paragraph::new(Text::from(lines)), body);
@@ -1124,12 +1187,7 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
             "Show VPS & session status",
             "cloudcode status",
         ),
-        (
-            "  /spawn",
-            " [name]",
-            "Create a session",
-            "cloudcode spawn",
-        ),
+        ("  /spawn", " [name]", "Create a session", "cloudcode spawn"),
         ("  /list", "", "List active sessions", "cloudcode list"),
         (
             "  /open",

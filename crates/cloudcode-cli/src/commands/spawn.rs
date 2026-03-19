@@ -43,7 +43,10 @@ pub async fn run(name: Option<String>) -> Result<()> {
             );
 
             let claude_needs_oauth = config.claude.as_ref().is_some_and(|c| c.uses_oauth());
-            let codex_needs_oauth = config.codex.as_ref().is_some_and(|c| matches!(c.auth_method, crate::config::AuthMethod::Oauth));
+            let codex_needs_oauth = config
+                .codex
+                .as_ref()
+                .is_some_and(|c| matches!(c.auth_method, crate::config::AuthMethod::Oauth));
 
             if claude_needs_oauth || codex_needs_oauth {
                 println!(
@@ -56,7 +59,9 @@ pub async fn run(name: Option<String>) -> Result<()> {
                     println!("  Claude: copy the login URL manually (don't press 'c').");
                 }
                 if codex_needs_oauth {
-                    println!("  Codex: select 'Device code' when prompted, then visit the URL in your browser.");
+                    println!(
+                        "  Codex: select 'Device code' when prompted, then visit the URL in your browser."
+                    );
                 }
             }
         }

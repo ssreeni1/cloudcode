@@ -27,7 +27,11 @@ pub async fn run(provider: Option<String>) -> Result<()> {
                 .output()
                 .context("Failed to read provider")?;
             let current = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let other = if current == "codex" { "claude" } else { "codex" };
+            let other = if current == "codex" {
+                "claude"
+            } else {
+                "codex"
+            };
             let in_tui = std::env::var("NO_COLOR").is_ok();
             let prefix = if in_tui { "/" } else { "cloudcode " };
             println!("Current provider: {}", current.green());
@@ -39,9 +43,9 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         }
         Some(name) => {
             // Validate provider name
-            let _provider: AiProvider = name
-                .parse()
-                .map_err(|_| anyhow::anyhow!("Unknown provider '{}'. Use 'claude' or 'codex'.", name))?;
+            let _provider: AiProvider = name.parse().map_err(|_| {
+                anyhow::anyhow!("Unknown provider '{}'. Use 'claude' or 'codex'.", name)
+            })?;
 
             // Write provider file on VPS
             let mut args = ssh_base_args(ip)?;

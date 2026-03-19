@@ -1,3 +1,6 @@
 /target
 Cargo.lock
 ChatContext.md
+.chat-history/
+.playwright-mcp/
+paygate-landing-full.png

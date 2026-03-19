@@ -298,7 +298,8 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 );
                 println!(
                     "  {}",
-                    "Codex will use device-code auth (works on VPS — no localhost needed).".dimmed()
+                    "Codex will use device-code auth (works on VPS — no localhost needed)."
+                        .dimmed()
                 );
                 println!(
                     "  {}",

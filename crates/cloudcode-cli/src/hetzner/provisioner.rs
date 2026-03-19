@@ -177,7 +177,8 @@ mod tests {
 
     #[test]
     fn cloud_init_runcmd_chown_home_before_setup_script() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
+        let output =
+            generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         // Find the runcmd section specifically
         let runcmd_section = output.split("runcmd:").last().unwrap();
         let chown_pos = runcmd_section
@@ -201,7 +202,8 @@ mod tests {
 
     #[test]
     fn cloud_init_installs_required_packages() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
+        let output =
+            generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("- tmux"));
         assert!(output.contains("- curl"));
         assert!(output.contains("- git"));
@@ -212,7 +214,8 @@ mod tests {
 
     #[test]
     fn cloud_init_creates_claude_user_with_sudo() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
+        let output =
+            generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("name: claude"));
         assert!(output.contains("groups: sudo"));
         assert!(output.contains("NOPASSWD:ALL"));
@@ -220,7 +223,8 @@ mod tests {
 
     #[test]
     fn cloud_init_setup_script_sets_up_ufw() {
-        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
+        let output =
+            generate_cloud_init("ssh-ed25519 AAAA test@test", Some(&dummy_claude_config()));
         assert!(output.contains("ufw default deny incoming"));
         assert!(output.contains("ufw allow 22/tcp"));
     }

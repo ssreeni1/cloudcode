@@ -7,7 +7,9 @@ use tokio::sync::mpsc;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::config::{AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig};
+use crate::config::{
+    AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig,
+};
 use crate::hetzner::client::{HetznerClient, ServerTypeInfo};
 use crate::state::VpsState;
 
@@ -1171,11 +1173,7 @@ impl App {
 
     fn spawn_up_with_server_type(&mut self, server_type: String) {
         let display = format!("/up --server-type {server_type}");
-        let args = vec![
-            "up".to_string(),
-            "--server-type".to_string(),
-            server_type,
-        ];
+        let args = vec!["up".to_string(), "--server-type".to_string(), server_type];
         self.spawn_with_display_and_args(display, args);
     }
 
@@ -1228,10 +1226,13 @@ mod tests {
     fn parse_provider_no_arg() {
         match parse_slash_command("provider") {
             ParseResult::Ok(SlashCommand::Provider(None)) => {}
-            other => panic!("Expected Provider(None), got {:?}", std::mem::discriminant(&match other {
-                ParseResult::Ok(c) => c,
-                _ => panic!("Expected Ok"),
-            })),
+            other => panic!(
+                "Expected Provider(None), got {:?}",
+                std::mem::discriminant(&match other {
+                    ParseResult::Ok(c) => c,
+                    _ => panic!("Expected Ok"),
+                })
+            ),
         }
     }
 
@@ -1245,28 +1246,70 @@ mod tests {
 
     #[test]
     fn parse_basic_commands() {
-        assert!(matches!(parse_slash_command("up"), ParseResult::Ok(SlashCommand::Up)));
-        assert!(matches!(parse_slash_command("down"), ParseResult::Ok(SlashCommand::Down)));
-        assert!(matches!(parse_slash_command("list"), ParseResult::Ok(SlashCommand::List)));
-        assert!(matches!(parse_slash_command("ls"), ParseResult::Ok(SlashCommand::List)));
-        assert!(matches!(parse_slash_command("status"), ParseResult::Ok(SlashCommand::Status)));
-        assert!(matches!(parse_slash_command("st"), ParseResult::Ok(SlashCommand::Status)));
-        assert!(matches!(parse_slash_command("help"), ParseResult::Ok(SlashCommand::Help)));
-        assert!(matches!(parse_slash_command("quit"), ParseResult::Ok(SlashCommand::Quit)));
+        assert!(matches!(
+            parse_slash_command("up"),
+            ParseResult::Ok(SlashCommand::Up)
+        ));
+        assert!(matches!(
+            parse_slash_command("down"),
+            ParseResult::Ok(SlashCommand::Down)
+        ));
+        assert!(matches!(
+            parse_slash_command("list"),
+            ParseResult::Ok(SlashCommand::List)
+        ));
+        assert!(matches!(
+            parse_slash_command("ls"),
+            ParseResult::Ok(SlashCommand::List)
+        ));
+        assert!(matches!(
+            parse_slash_command("status"),
+            ParseResult::Ok(SlashCommand::Status)
+        ));
+        assert!(matches!(
+            parse_slash_command("st"),
+            ParseResult::Ok(SlashCommand::Status)
+        ));
+        assert!(matches!(
+            parse_slash_command("help"),
+            ParseResult::Ok(SlashCommand::Help)
+        ));
+        assert!(matches!(
+            parse_slash_command("quit"),
+            ParseResult::Ok(SlashCommand::Quit)
+        ));
     }
 
     #[test]
     fn parse_empty_and_unknown() {
         assert!(matches!(parse_slash_command(""), ParseResult::Empty));
-        assert!(matches!(parse_slash_command("nonexistent"), ParseResult::Unknown(_)));
+        assert!(matches!(
+            parse_slash_command("nonexistent"),
+            ParseResult::Unknown(_)
+        ));
     }
 
     #[test]
     fn parse_commands_with_args() {
-        assert!(matches!(parse_slash_command("spawn myname"), ParseResult::Ok(SlashCommand::Spawn(Some(_)))));
-        assert!(matches!(parse_slash_command("open sess1"), ParseResult::Ok(SlashCommand::Open(_))));
-        assert!(matches!(parse_slash_command("kill sess1"), ParseResult::Ok(SlashCommand::Kill(_))));
-        assert!(matches!(parse_slash_command("open"), ParseResult::MissingArg(_)));
-        assert!(matches!(parse_slash_command("kill"), ParseResult::MissingArg(_)));
+        assert!(matches!(
+            parse_slash_command("spawn myname"),
+            ParseResult::Ok(SlashCommand::Spawn(Some(_)))
+        ));
+        assert!(matches!(
+            parse_slash_command("open sess1"),
+            ParseResult::Ok(SlashCommand::Open(_))
+        ));
+        assert!(matches!(
+            parse_slash_command("kill sess1"),
+            ParseResult::Ok(SlashCommand::Kill(_))
+        ));
+        assert!(matches!(
+            parse_slash_command("open"),
+            ParseResult::MissingArg(_)
+        ));
+        assert!(matches!(
+            parse_slash_command("kill"),
+            ParseResult::MissingArg(_)
+        ));
     }
 }
