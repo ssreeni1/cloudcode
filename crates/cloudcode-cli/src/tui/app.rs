@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::config::{AuthMethod, ClaudeConfig, Config, HetznerConfig, TelegramConfig};
+use crate::config::{AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig};
 use crate::hetzner::client::{HetznerClient, ServerTypeInfo};
 use crate::state::VpsState;
 
@@ -68,6 +68,7 @@ pub enum SlashCommand {
     Send(String, String),
     Kill(String),
     Status,
+    Provider(Option<String>),
     Restart,
     Logs(Option<String>),
     Ssh(Vec<String>),
@@ -101,6 +102,13 @@ impl SlashCommand {
             Self::Kill(s) => vec!["kill".into(), s.clone()],
             Self::Send(s, m) => vec!["send".into(), s.clone(), m.clone()],
             Self::Status => vec!["status".into()],
+            Self::Provider(p) => {
+                let mut a = vec!["provider".into()];
+                if let Some(p) = p {
+                    a.push(p.clone());
+                }
+                a
+            }
             Self::Restart => vec!["restart".into()],
             Self::Logs(t) => {
                 let mut a = vec!["logs".into()];
@@ -133,6 +141,8 @@ impl SlashCommand {
             Self::Send(s, _) => format!("/send {s} ..."),
             Self::Kill(s) => format!("/kill {s}"),
             Self::Status => "/status".into(),
+            Self::Provider(Some(p)) => format!("/provider {p}"),
+            Self::Provider(None) => "/provider".into(),
             Self::Restart => "/restart".into(),
             Self::Logs(Some(t)) => format!("/logs {t}"),
             Self::Logs(None) => "/logs".into(),
@@ -181,6 +191,7 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
             None => ParseResult::MissingArg("/kill <session>"),
         },
         "status" | "st" => ParseResult::Ok(SlashCommand::Status),
+        "provider" => ParseResult::Ok(SlashCommand::Provider(arg1.map(String::from))),
         "restart" => ParseResult::Ok(SlashCommand::Restart),
         "logs" | "log" => ParseResult::Ok(SlashCommand::Logs(arg1.map(String::from))),
         "ssh" => {
@@ -214,9 +225,18 @@ pub struct App {
     pub hetzner_input: Input,
     pub hetzner_status: ValidationStatus,
 
+    // Provider
+    pub provider_choice: usize, // 0=Claude, 1=Codex, 2=Both
+    pub wants_claude: bool,
+    pub wants_codex: bool,
+
     // Claude
     pub auth_choice: usize,
     pub api_key_input: Input,
+
+    // Codex
+    pub codex_auth_choice: usize,
+    pub codex_api_key_input: Input,
 
     // Telegram
     pub telegram_enabled: bool,
@@ -292,8 +312,15 @@ impl App {
             hetzner_input: Input::default(),
             hetzner_status: ValidationStatus::Idle,
 
+            provider_choice: 0,
+            wants_claude: true,
+            wants_codex: false,
+
             auth_choice: 0,
             api_key_input: Input::default(),
+
+            codex_auth_choice: 0,
+            codex_api_key_input: Input::default(),
 
             telegram_enabled: false,
             telegram_choice: 1,
@@ -409,9 +436,13 @@ impl App {
         match self.step {
             WizardStep::Welcome => self.handle_welcome_key(key),
             WizardStep::Hetzner => self.handle_hetzner_key(key),
+            WizardStep::Provider => self.handle_provider_key(key),
             WizardStep::Claude => self.handle_claude_key(key),
             WizardStep::ClaudeApiKey => self.handle_api_key_key(key),
             WizardStep::OAuthWarning => self.handle_oauth_warning_key(key),
+            WizardStep::Codex => self.handle_codex_key(key),
+            WizardStep::CodexApiKey => self.handle_codex_api_key_key(key),
+            WizardStep::CodexOAuthWarning => self.handle_codex_oauth_warning_key(key),
             WizardStep::Telegram => self.handle_telegram_key(key),
             WizardStep::Generating => {}
             WizardStep::Complete => {
@@ -468,6 +499,49 @@ impl App {
         }
     }
 
+    fn handle_provider_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.provider_choice > 0 {
+                    self.provider_choice -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.provider_choice < 2 {
+                    self.provider_choice += 1;
+                }
+            }
+            KeyCode::Enter => {
+                match self.provider_choice {
+                    0 => {
+                        // Claude only
+                        self.wants_claude = true;
+                        self.wants_codex = false;
+                        self.config.default_provider = Some(AiProvider::Claude);
+                        self.step = WizardStep::Claude;
+                    }
+                    1 => {
+                        // Codex only
+                        self.wants_claude = false;
+                        self.wants_codex = true;
+                        self.config.default_provider = Some(AiProvider::Codex);
+                        self.step = WizardStep::Codex;
+                    }
+                    2 => {
+                        // Both
+                        self.wants_claude = true;
+                        self.wants_codex = true;
+                        self.config.default_provider = Some(AiProvider::Claude);
+                        self.step = WizardStep::Claude;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            KeyCode::Esc => self.step = WizardStep::Hetzner,
+            _ => {}
+        }
+    }
+
     fn handle_claude_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -487,8 +561,16 @@ impl App {
                     self.step = WizardStep::OAuthWarning;
                 }
             }
-            KeyCode::Esc => self.step = WizardStep::Hetzner,
+            KeyCode::Esc => self.step = WizardStep::Provider,
             _ => {}
+        }
+    }
+
+    fn next_step_after_claude(&self) -> WizardStep {
+        if self.wants_codex {
+            WizardStep::Codex
+        } else {
+            WizardStep::Telegram
         }
     }
 
@@ -502,7 +584,7 @@ impl App {
                         api_key: Some(api_key),
                         oauth_token: None,
                     });
-                    self.step = WizardStep::Telegram;
+                    self.step = self.next_step_after_claude();
                 }
             }
             KeyCode::Esc => self.step = WizardStep::Claude,
@@ -521,9 +603,67 @@ impl App {
                     api_key: None,
                     oauth_token: None,
                 });
-                self.step = WizardStep::Telegram;
+                self.step = self.next_step_after_claude();
             }
             KeyCode::Esc => self.step = WizardStep::Claude,
+            _ => {}
+        }
+    }
+
+    fn handle_codex_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if self.codex_auth_choice > 0 {
+                    self.codex_auth_choice -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.codex_auth_choice < 1 {
+                    self.codex_auth_choice += 1;
+                }
+            }
+            KeyCode::Enter => {
+                if self.codex_auth_choice == 0 {
+                    self.step = WizardStep::CodexApiKey;
+                } else {
+                    self.step = WizardStep::CodexOAuthWarning;
+                }
+            }
+            KeyCode::Esc => self.step = WizardStep::Provider,
+            _ => {}
+        }
+    }
+
+    fn handle_codex_api_key_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                let api_key = self.codex_api_key_input.value().trim().to_string();
+                if !api_key.is_empty() {
+                    self.config.codex = Some(CodexConfig {
+                        auth_method: AuthMethod::ApiKey,
+                        api_key: Some(api_key),
+                    });
+                    self.step = WizardStep::Telegram;
+                }
+            }
+            KeyCode::Esc => self.step = WizardStep::Codex,
+            _ => {
+                self.codex_api_key_input
+                    .handle_event(&crossterm::event::Event::Key(key));
+            }
+        }
+    }
+
+    fn handle_codex_oauth_warning_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.config.codex = Some(CodexConfig {
+                    auth_method: AuthMethod::Oauth,
+                    api_key: None,
+                });
+                self.step = WizardStep::Telegram;
+            }
+            KeyCode::Esc => self.step = WizardStep::Codex,
             _ => {}
         }
     }
@@ -550,10 +690,12 @@ impl App {
                     }
                 }
                 KeyCode::Esc => {
-                    if self.auth_choice == 0 {
-                        self.step = WizardStep::ClaudeApiKey;
+                    if self.wants_codex && self.config.codex.is_some() {
+                        self.step = WizardStep::Codex;
+                    } else if self.wants_claude {
+                        self.step = WizardStep::Claude;
                     } else {
-                        self.step = WizardStep::OAuthWarning;
+                        self.step = WizardStep::Provider;
                     }
                 }
                 _ => {}
@@ -632,7 +774,7 @@ impl App {
                     self.hetzner_status = ValidationStatus::Success;
                     let token = self.hetzner_input.value().trim().to_string();
                     self.config.hetzner = Some(HetznerConfig { api_token: token });
-                    self.step = WizardStep::Claude;
+                    self.step = WizardStep::Provider;
                 }
                 Err(e) => {
                     self.hetzner_status = ValidationStatus::Failed(e);
@@ -723,6 +865,13 @@ impl App {
     pub fn spawn_captured_command(&mut self, cmd: SlashCommand) {
         let display = cmd.display_name();
         let args = cmd.to_cli_args();
+        self.spawn_with_display_and_args(display, args);
+    }
+
+    /// Shared subprocess spawning logic: sets up TUI state, spawns a child
+    /// process with the given CLI `args`, streams stdout/stderr into `log_tx`,
+    /// and sends `LogEvent::Done` when complete.
+    fn spawn_with_display_and_args(&mut self, display: String, args: Vec<String>) {
         let tx = self.log_tx.clone();
         let pid_ref = self.child_pid.clone();
 
@@ -1021,164 +1170,20 @@ impl App {
     }
 
     fn spawn_up_with_server_type(&mut self, server_type: String) {
-        let tx = self.log_tx.clone();
-        let pid_ref = self.child_pid.clone();
         let display = format!("/up --server-type {server_type}");
-
-        self.flush_to_history();
-        self.running_command = Some(display);
-        self.command_done = false;
-        self.show_help = false;
-        self.log_scroll = 0;
-        self.error_message = None;
-        self.child_pid.store(0, Ordering::SeqCst);
-
-        tokio::spawn(async move {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => {
-                    let _ = tx.send(LogEvent::Stderr(format!("Failed to find executable: {e}")));
-                    let _ = tx.send(LogEvent::Done(None));
-                    return;
-                }
-            };
-
-            let mut child = match ProcessCommand::new(&exe)
-                .args(["up", "--server-type", &server_type])
-                .env("NO_COLOR", "1")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(LogEvent::Stderr(format!("Failed to run: {e}")));
-                    let _ = tx.send(LogEvent::Done(None));
-                    return;
-                }
-            };
-
-            pid_ref.store(child.id(), Ordering::SeqCst);
-
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-
-            let tx2 = tx.clone();
-            let stdout_handle = tokio::task::spawn_blocking(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stdout);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            let _ = tx2.send(LogEvent::Stdout(l));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            let tx3 = tx.clone();
-            let stderr_handle = tokio::task::spawn_blocking(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stderr);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            let _ = tx3.send(LogEvent::Stderr(l));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            let _ = stdout_handle.await;
-            let _ = stderr_handle.await;
-
-            let status = child.wait().ok().and_then(|s| s.code());
-            pid_ref.store(0, Ordering::SeqCst);
-            let _ = tx.send(LogEvent::Done(status));
-        });
+        let args = vec![
+            "up".to_string(),
+            "--server-type".to_string(),
+            server_type,
+        ];
+        self.spawn_with_display_and_args(display, args);
     }
 
     fn spawn_down_force(&mut self) {
-        let tx = self.log_tx.clone();
-        let pid_ref = self.child_pid.clone();
-
-        self.flush_to_history();
-        self.running_command = Some("/down --force".to_string());
-        self.command_done = false;
-        self.show_help = false;
-        self.log_scroll = 0;
-        self.error_message = None;
-        self.child_pid.store(0, Ordering::SeqCst);
-
-        tokio::spawn(async move {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => {
-                    let _ = tx.send(LogEvent::Stderr(format!("Failed to find executable: {e}")));
-                    let _ = tx.send(LogEvent::Done(None));
-                    return;
-                }
-            };
-
-            let mut child = match ProcessCommand::new(&exe)
-                .args(["down", "--force"])
-                .env("NO_COLOR", "1")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = tx.send(LogEvent::Stderr(format!("Failed to run: {e}")));
-                    let _ = tx.send(LogEvent::Done(None));
-                    return;
-                }
-            };
-
-            pid_ref.store(child.id(), Ordering::SeqCst);
-
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-
-            let tx2 = tx.clone();
-            let stdout_handle = tokio::task::spawn_blocking(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stdout);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            let _ = tx2.send(LogEvent::Stdout(l));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            let tx3 = tx.clone();
-            let stderr_handle = tokio::task::spawn_blocking(move || {
-                use std::io::BufRead;
-                let reader = std::io::BufReader::new(stderr);
-                for line in reader.lines() {
-                    match line {
-                        Ok(l) => {
-                            let _ = tx3.send(LogEvent::Stderr(l));
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-
-            let _ = stdout_handle.await;
-            let _ = stderr_handle.await;
-
-            let status = child.wait().ok().and_then(|s| s.code());
-            pid_ref.store(0, Ordering::SeqCst);
-            let _ = tx.send(LogEvent::Done(status));
-        });
+        self.spawn_with_display_and_args(
+            "/down --force".to_string(),
+            vec!["down".to_string(), "--force".to_string()],
+        );
     }
 
     fn reset_wizard_state(&mut self) {
@@ -1212,5 +1217,56 @@ impl App {
             .as_ref()
             .map(|c| c.uses_oauth())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_provider_no_arg() {
+        match parse_slash_command("provider") {
+            ParseResult::Ok(SlashCommand::Provider(None)) => {}
+            other => panic!("Expected Provider(None), got {:?}", std::mem::discriminant(&match other {
+                ParseResult::Ok(c) => c,
+                _ => panic!("Expected Ok"),
+            })),
+        }
+    }
+
+    #[test]
+    fn parse_provider_with_arg() {
+        match parse_slash_command("provider codex") {
+            ParseResult::Ok(SlashCommand::Provider(Some(p))) => assert_eq!(p, "codex"),
+            _ => panic!("Expected Provider(Some(\"codex\"))"),
+        }
+    }
+
+    #[test]
+    fn parse_basic_commands() {
+        assert!(matches!(parse_slash_command("up"), ParseResult::Ok(SlashCommand::Up)));
+        assert!(matches!(parse_slash_command("down"), ParseResult::Ok(SlashCommand::Down)));
+        assert!(matches!(parse_slash_command("list"), ParseResult::Ok(SlashCommand::List)));
+        assert!(matches!(parse_slash_command("ls"), ParseResult::Ok(SlashCommand::List)));
+        assert!(matches!(parse_slash_command("status"), ParseResult::Ok(SlashCommand::Status)));
+        assert!(matches!(parse_slash_command("st"), ParseResult::Ok(SlashCommand::Status)));
+        assert!(matches!(parse_slash_command("help"), ParseResult::Ok(SlashCommand::Help)));
+        assert!(matches!(parse_slash_command("quit"), ParseResult::Ok(SlashCommand::Quit)));
+    }
+
+    #[test]
+    fn parse_empty_and_unknown() {
+        assert!(matches!(parse_slash_command(""), ParseResult::Empty));
+        assert!(matches!(parse_slash_command("nonexistent"), ParseResult::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_commands_with_args() {
+        assert!(matches!(parse_slash_command("spawn myname"), ParseResult::Ok(SlashCommand::Spawn(Some(_)))));
+        assert!(matches!(parse_slash_command("open sess1"), ParseResult::Ok(SlashCommand::Open(_))));
+        assert!(matches!(parse_slash_command("kill sess1"), ParseResult::Ok(SlashCommand::Kill(_))));
+        assert!(matches!(parse_slash_command("open"), ParseResult::MissingArg(_)));
+        assert!(matches!(parse_slash_command("kill"), ParseResult::MissingArg(_)));
     }
 }

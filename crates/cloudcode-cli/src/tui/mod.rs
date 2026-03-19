@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::ExecutableCommand;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -39,6 +39,7 @@ pub async fn run_tui(force_wizard: bool) -> Result<()> {
 
     loop {
         enable_raw_mode()?;
+        io::stdout().execute(EnableMouseCapture)?;
         io::stdout().execute(EnterAlternateScreen)?;
         let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         terminal.clear()?;
@@ -47,6 +48,7 @@ pub async fn run_tui(force_wizard: bool) -> Result<()> {
 
         drop(terminal);
         disable_raw_mode()?;
+        io::stdout().execute(DisableMouseCapture)?;
         io::stdout().execute(LeaveAlternateScreen)?;
 
         match action {
@@ -77,8 +79,18 @@ async fn run_event_loop(
         }
 
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key);
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        app.log_scroll = app.log_scroll.saturating_add(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        app.log_scroll = app.log_scroll.saturating_sub(3);
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
 
