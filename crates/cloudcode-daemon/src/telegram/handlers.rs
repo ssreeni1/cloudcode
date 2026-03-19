@@ -182,11 +182,17 @@ async fn handle_spawn(
             }
         }
         Err(err) => {
-            if is_oauth_error(&err) {
+            let provider = state.session_mgr.current_provider();
+            if is_auth_error(&err, provider) {
+                let auth_hint = match provider {
+                    cloudcode_common::provider::AiProvider::Claude =>
+                        "Run `cloudcode open <session>` from your terminal to complete the OAuth login.",
+                    cloudcode_common::provider::AiProvider::Codex =>
+                        "Run `cloudcode open <session>` from your terminal, select 'Device code', and authorize in your browser.",
+                };
                 bot.send_message(
                     msg.chat.id,
-                    "❌ OAuth login has not been completed on the VPS.\n\n\
-                     Run `cloudcode open <session>` from your terminal to complete the login flow first.",
+                    format!("❌ {} needs authentication.\n\n{}", provider, auth_hint),
                 )
                 .await?;
             } else {
@@ -723,7 +729,7 @@ async fn handle_free_text(
             Err(err) => {
                 let err_str = err.to_string();
                 // Don't retry non-transient errors
-                if is_oauth_error(err)
+                if is_auth_error(err, state.session_mgr.current_provider())
                     || err_str.contains("does not exist")
                     || err_str.contains("timed out")
                 {
@@ -748,16 +754,27 @@ async fn handle_free_text(
             send_result_files(bot, msg.chat.id, &result.files).await?;
         }
         Err(err) => {
-            if is_oauth_error(&err) {
+            let provider = state.session_mgr.current_provider();
+            if is_auth_error(&err, provider) {
+                let auth_hint = match provider {
+                    cloudcode_common::provider::AiProvider::Claude =>
+                        "Complete login from your terminal:\n\
+                         1. cloudcode open <session>\n\
+                         2. Copy the login URL and paste in your browser\n\
+                         3. Complete the OAuth flow",
+                    cloudcode_common::provider::AiProvider::Codex =>
+                        "Complete login from your terminal:\n\
+                         1. cloudcode open <session>\n\
+                         2. Select 'Device code' when prompted\n\
+                         3. Visit the URL in your browser to authorize",
+                };
                 send_text(
                     bot,
                     msg.chat.id,
-                    "❌ OAuth login has not been completed on the VPS.\n\n\
-                     To fix this, run from your terminal:\n\
-                     1. cloudcode spawn (or /spawn in TUI)\n\
-                     2. cloudcode open <session-name>\n\
-                     3. Complete the OAuth login flow in your browser\n\n\
-                     Telegram will work once OAuth is complete.",
+                    &format!(
+                        "❌ {} needs authentication.\n\n{}\n\nTelegram will work once login is complete.",
+                        provider, auth_hint
+                    ),
                 )
                 .await?;
             } else {
@@ -769,12 +786,42 @@ async fn handle_free_text(
     Ok(())
 }
 
-fn is_oauth_error(err: &anyhow::Error) -> bool {
-    let err_str = err.to_string();
-    err_str.contains("auth")
+/// Check if an error is likely caused by missing authentication.
+/// Checks both the error message AND whether credentials actually exist on disk.
+fn is_auth_error(err: &anyhow::Error, provider: cloudcode_common::provider::AiProvider) -> bool {
+    let err_str = err.to_string().to_lowercase();
+
+    // Check error message for auth-related keywords
+    let msg_match = err_str.contains("auth")
         || err_str.contains("login")
-        || err_str.contains("OAuth")
+        || err_str.contains("oauth")
         || err_str.contains("unauthorized")
         || err_str.contains("credentials")
         || err_str.contains("401")
+        || err_str.contains("not logged in")
+        || err_str.contains("api key");
+
+    if msg_match {
+        return true;
+    }
+
+    // If the provider binary failed (non-zero exit) and credentials are missing,
+    // it's almost certainly an auth issue even if the error message is vague.
+    if err_str.contains("failed:") {
+        let has_creds = match provider {
+            cloudcode_common::provider::AiProvider::Claude => {
+                std::env::var("ANTHROPIC_API_KEY").is_ok()
+                    || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
+            }
+            cloudcode_common::provider::AiProvider::Codex => {
+                std::env::var("OPENAI_API_KEY").is_ok()
+                    || std::path::Path::new("/home/claude/.codex/auth.json").exists()
+            }
+        };
+        if !has_creds {
+            return true;
+        }
+    }
+
+    false
 }
