@@ -199,7 +199,7 @@ owner_id = 12345
 | `~/.cloudcode/default-provider` | Current default AI provider |
 | `~/.cloudcode/sessions/<name>/provider` | Per-session provider |
 | `~/.cloudcode/contexts/context_<name>.md` | Session context file |
-| `~/.claude/credentials.json` | Claude OAuth credentials (created on VPS during login) |
+| `~/.claude/.credentials.json` | Claude OAuth credentials (created on VPS during login) |
 | `~/.codex/auth.json` | Codex OAuth credentials (created on VPS during login) |
 | `~/.cloudcode-env` | API keys (sourced by sessions) |
 | `~/.cloudcode-status.json` | Cloud-init completion marker |
@@ -462,7 +462,7 @@ Implements: `Display`, `FromStr` (case-insensitive), `Serialize`, `Deserialize`.
 | Provider | Ready When |
 |----------|-----------|
 | Claude (API key) | `ANTHROPIC_API_KEY` env var set |
-| Claude (OAuth) | `~/.claude/credentials.json` exists |
+| Claude (OAuth) | `~/.claude/.credentials.json` exists |
 | Codex (API key) | `OPENAI_API_KEY` env var set + binary exists |
 | Codex (OAuth) | `~/.codex/auth.json` exists + binary exists |
 
@@ -715,6 +715,6 @@ The daemon MUST bind to `127.0.0.1:7700` only (localhost). It is never exposed o
 - **No conversation persistence**: Session history lost on daemon restart; question forwarding state is ephemeral (in-memory)
 - **Codex stateless**: No `--continue` equivalent — each send is independent
 - **Question detection**: Heuristic-based pattern matching; false positives possible from log output matching prompt patterns
-- **OAuth tokens**: Stored on VPS in `~/.claude/credentials.json` / `~/.codex/auth.json` (persistent but revocable)
+- **OAuth tokens**: Stored on VPS in `~/.claude/.credentials.json` / `~/.codex/auth.json` (persistent but revocable)
 - **Telegram access control**: Chat-scoped, not user-scoped — group chats expose VPS control to all participants
 - **Send timeout**: A hung AI subprocess holds the per-session lock indefinitely; no daemon-side subprocess timeout

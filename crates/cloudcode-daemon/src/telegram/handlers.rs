@@ -139,7 +139,7 @@ async fn handle_spawn(
                 cloudcode_common::provider::AiProvider::Claude => {
                     // Claude: API key in env OR OAuth credentials file
                     std::env::var("ANTHROPIC_API_KEY").is_ok()
-                        || std::path::Path::new("/home/claude/.claude/credentials.json").exists()
+                        || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
                 }
                 cloudcode_common::provider::AiProvider::Codex => {
                     // Codex: API key in env OR auth.json from device-code login
@@ -381,7 +381,7 @@ fn provider_status(provider: AiProvider) -> ProviderStatus {
     match provider {
         AiProvider::Claude => {
             let has_api_key = std::env::var("ANTHROPIC_API_KEY").is_ok();
-            let has_oauth = std::path::Path::new("/home/claude/.claude/credentials.json").exists();
+            let has_oauth = std::path::Path::new("/home/claude/.claude/.credentials.json").exists();
             match (has_api_key, has_oauth) {
                 (true, _) | (_, true) => ProviderStatus {
                     summary: "✅ ready",
