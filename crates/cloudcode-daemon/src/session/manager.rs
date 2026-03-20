@@ -66,6 +66,43 @@ fn snapshot_files(dirs: &[PathBuf]) -> HashMap<PathBuf, (SystemTime, u64)> {
 }
 
 /// Check if a file is a type we should send via Telegram.
+/// Scan the AI's response text for file paths that exist in the workspace.
+/// This handles follow-up messages like "send that file" where the file
+/// was created in a previous interaction and isn't in the new-files diff.
+fn extract_referenced_files(response: &str, workdir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Match paths that look like filenames with extensions.
+    // Patterns: `path/to/file.ext`, `/absolute/path.ext`, or just `file.ext`
+    // Surrounded by backticks, quotes, spaces, or line boundaries.
+    static FILE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?:^|[\s`"'(])((?:\.?/)?(?:[\w./-]+/)?[\w.-]+\.\w{1,10})(?:[\s`"'),.]|$)"#)
+            .unwrap()
+    });
+
+    for cap in FILE_RE.captures_iter(response) {
+        let path_str = cap.get(1).unwrap().as_str();
+
+        // Try as relative to workdir first, then as absolute
+        let candidates = [
+            workdir.join(path_str),
+            PathBuf::from(path_str),
+        ];
+
+        for candidate in &candidates {
+            if candidate.is_file() && is_sendable_file(candidate) {
+                if seen.insert(candidate.clone()) {
+                    found.push(candidate.clone());
+                }
+                break;
+            }
+        }
+    }
+
+    found
+}
+
 fn is_sendable_file(path: &PathBuf) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
@@ -594,7 +631,7 @@ impl SessionManager {
 
         // Find new or modified files
         let files_after = snapshot_files(&watch_dirs);
-        let new_files: Vec<PathBuf> = files_after
+        let mut new_files: Vec<PathBuf> = files_after
             .into_iter()
             .filter(|(path, (mtime, size))| {
                 match files_before.get(path) {
@@ -605,6 +642,21 @@ impl SessionManager {
             .map(|(path, _)| path)
             .filter(|f| is_sendable_file(f))
             .collect();
+
+        // If no new files found, scan the AI's response for references to
+        // existing files in the workspace (handles "send that file" follow-ups).
+        if new_files.is_empty() {
+            let referenced = extract_referenced_files(&response, &workdir);
+            if !referenced.is_empty() {
+                log::info!(
+                    "Session '{}': found {} file(s) referenced in response: {:?}",
+                    session,
+                    referenced.len(),
+                    referenced
+                );
+                new_files = referenced;
+            }
+        }
 
         if !new_files.is_empty() {
             log::info!(
