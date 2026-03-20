@@ -472,6 +472,7 @@ pub async fn type_logic(state: &DaemonState, args: &str) -> DispatchResult {
 }
 
 pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult {
+    let mut auto_select_msg: Option<String> = None;
     let session_name = match resolve_free_text_session_with(
         &state.session_mgr,
         &state.default_session,
@@ -489,6 +490,7 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
                         name, err
                     ));
                 }
+                auto_select_msg = Some(format!("📌 Auto-selected session '{}'.", name));
             }
             name
         }
@@ -534,7 +536,7 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
         }
     }
 
-    match send_result {
+    let mut final_result = match send_result {
         Ok(result) => {
             let mut dispatch = DispatchResult::markdown(result.text);
             dispatch.files = result.files;
@@ -565,5 +567,18 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
                 DispatchResult::error(err.to_string())
             }
         }
+    };
+
+    // Prepend auto-select notification if applicable
+    if let Some(msg) = auto_select_msg {
+        final_result.messages.insert(
+            0,
+            DispatchMessage {
+                text: msg,
+                format: MessageFormat::Plain,
+            },
+        );
     }
+
+    final_result
 }
