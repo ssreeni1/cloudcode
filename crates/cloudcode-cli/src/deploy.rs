@@ -554,7 +554,8 @@ chmod 0644 /home/claude/AGENTS.md
 mkdir -p /home/claude/.codex
 cat << 'CODEX_TOML' > /home/claude/.codex/config.toml
 model = "gpt-5.4"
-sandbox_permissions = ["disk-full-read-access"]
+sandbox_mode = "danger-full-access"
+approval_policy = "on-request"
 CODEX_TOML
 chown -R claude:claude /home/claude/.codex
 chmod 0700 /home/claude/.codex
