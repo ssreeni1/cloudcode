@@ -553,7 +553,7 @@ chown claude:claude /home/claude/AGENTS.md
 chmod 0644 /home/claude/AGENTS.md
 mkdir -p /home/claude/.codex
 cat << 'CODEX_TOML' > /home/claude/.codex/config.toml
-model = "gpt-5.4-medium"
+model = "o3"
 sandbox_permissions = ["disk-full-read-access"]
 CODEX_TOML
 chown -R claude:claude /home/claude/.codex
