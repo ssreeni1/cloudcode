@@ -213,7 +213,11 @@ pub async fn send_markdownish(sender: &dyn TelegramSender, chat_id: i64, text: &
 }
 
 /// Send preformatted text wrapped in <pre> tags.
-pub async fn send_preformatted(sender: &dyn TelegramSender, chat_id: i64, text: &str) -> Result<()> {
+pub async fn send_preformatted(
+    sender: &dyn TelegramSender,
+    chat_id: i64,
+    text: &str,
+) -> Result<()> {
     if text.trim().is_empty() {
         return Ok(());
     }
@@ -237,10 +241,7 @@ pub async fn send_result_files(
         }
 
         let file_size = file_path.metadata().map(|m| m.len()).unwrap_or(0);
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let filename = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -256,7 +257,11 @@ pub async fn send_result_files(
         };
 
         if file_size > max_size {
-            log::warn!("Skipping file {} ({} bytes, exceeds limit)", filename, file_size);
+            log::warn!(
+                "Skipping file {} ({} bytes, exceeds limit)",
+                filename,
+                file_size
+            );
             let _ = sender
                 .send_text(
                     chat_id,
@@ -279,10 +284,7 @@ pub async fn send_result_files(
         if let Err(err) = result {
             log::error!("Failed to send file {}: {}", filename, err);
             let _ = sender
-                .send_text(
-                    chat_id,
-                    &format!("⚠️ Failed to send {}: {}", filename, err),
-                )
+                .send_text(chat_id, &format!("⚠️ Failed to send {}: {}", filename, err))
                 .await;
         }
     }

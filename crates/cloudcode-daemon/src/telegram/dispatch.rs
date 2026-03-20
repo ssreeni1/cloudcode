@@ -7,9 +7,9 @@ use crate::session::manager::SessionManager;
 use crate::telegram::default_session::DefaultSessionStore;
 use crate::telegram::question_poller::QuestionStates;
 use crate::telegram::session_resolution::{
-    FreeTextSessionTarget, ReplyTarget, resolve_free_text_session_with,
-    resolve_reply_target_with, resolve_command_session_with, resolve_type_target_with,
-    waiting_sessions_from, clear_waiting_state_from, session_exists_with,
+    FreeTextSessionTarget, ReplyTarget, clear_waiting_state_from, resolve_command_session_with,
+    resolve_free_text_session_with, resolve_reply_target_with, resolve_type_target_with,
+    session_exists_with, waiting_sessions_from,
 };
 
 // ---------------------------------------------------------------------------
@@ -235,7 +235,10 @@ pub async fn spawn_logic(state: &DaemonState, args: &str) -> DispatchResult {
                         "Run `cloudcode open <session>` from your terminal, select 'Device code', and authorize in your browser."
                     }
                 };
-                DispatchResult::plain(format!("❌ {} needs authentication.\n\n{}", provider, auth_hint))
+                DispatchResult::plain(format!(
+                    "❌ {} needs authentication.\n\n{}",
+                    provider, auth_hint
+                ))
             } else {
                 DispatchResult::error(err.to_string())
             }
@@ -390,7 +393,11 @@ pub async fn reply_logic(state: &DaemonState, args: &str) -> DispatchResult {
         Ok(ReplyTarget::Ready {
             session_name,
             reply_text,
-        }) => match state.session_mgr.send_keys(&session_name, &reply_text).await {
+        }) => match state
+            .session_mgr
+            .send_keys(&session_name, &reply_text)
+            .await
+        {
             Ok(()) => {
                 clear_waiting_state_from(&state.question_states, &session_name);
                 DispatchResult::plain(format!("✅ Replied to '{}'.", session_name))
@@ -436,9 +443,7 @@ pub async fn peek_logic(state: &DaemonState, args: &str) -> DispatchResult {
     let explicit = (!args.is_empty()).then_some(args);
     match resolve_command_session_with(&state.session_mgr, &state.default_session, explicit).await {
         Ok(Some(name)) => match state.session_mgr.capture_pane(&name).await {
-            Ok(content) if content.trim().is_empty() => {
-                DispatchResult::plain("(pane is empty)")
-            }
+            Ok(content) if content.trim().is_empty() => DispatchResult::plain("(pane is empty)"),
             Ok(content) => DispatchResult::preformatted(content),
             Err(err) => DispatchResult::error(err.to_string()),
         },

@@ -16,7 +16,6 @@ pub struct DaemonClient {
     tunnel: Option<Child>,
     socket_path: PathBuf,
     server_ip: String,
-    server_id: u64,
 }
 
 impl DaemonClient {
@@ -30,7 +29,6 @@ impl DaemonClient {
             tunnel: None,
             socket_path,
             server_ip: ip.clone(),
-            server_id,
         };
 
         client.spawn_tunnel()?;
@@ -167,7 +165,10 @@ impl DaemonClient {
                 Ok(())
             }
             Err(e) => {
-                bail!("SSH tunnel died and reconnect failed: {}. Try running the command again.", e);
+                bail!(
+                    "SSH tunnel died and reconnect failed: {}. Try running the command again.",
+                    e
+                );
             }
         }
     }

@@ -4,9 +4,7 @@ use crate::telegram::default_session::DefaultSessionStore;
 use crate::telegram::handlers::provider_has_auth;
 use crate::telegram::question_poller::QuestionStates;
 use crate::telegram::session_resolution::waiting_sessions_from;
-use cloudcode_common::protocol::{
-    DaemonRequest, DaemonResponse, TelegramStatus, WaitingSession,
-};
+use cloudcode_common::protocol::{DaemonRequest, DaemonResponse, TelegramStatus, WaitingSession};
 use cloudcode_common::provider::AiProvider;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,7 +122,7 @@ pub async fn handle_with_state(
                 Err(_) => {
                     return DaemonResponse::Error {
                         message: format!("Unknown provider: {}", provider),
-                    }
+                    };
                 }
             };
             mgr.set_provider(target);

@@ -89,8 +89,10 @@ fn extract_referenced_files(response: &str, workdir: &Path) -> Vec<PathBuf> {
     // Patterns: `path/to/file.ext`, `/absolute/path.ext`, or just `file.ext`
     // Surrounded by backticks, quotes, spaces, or line boundaries.
     static FILE_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?:^|[\s`"'(])((?:\.?/)?(?:[\w./-]+/)?[\w.-]+\.\w{1,10})(?:[\s`"'),.]|$)"#)
-            .unwrap()
+        regex::Regex::new(
+            r#"(?:^|[\s`"'(])((?:\.?/)?(?:[\w./-]+/)?[\w.-]+\.\w{1,10})(?:[\s`"'),.]|$)"#,
+        )
+        .unwrap()
     });
 
     for cap in FILE_RE.captures_iter(response) {
@@ -106,10 +108,7 @@ fn extract_referenced_files(response: &str, workdir: &Path) -> Vec<PathBuf> {
         }
 
         // Try as relative to workdir first, then as absolute
-        let candidates = [
-            workdir.join(path_str),
-            PathBuf::from(path_str),
-        ];
+        let candidates = [workdir.join(path_str), PathBuf::from(path_str)];
 
         for candidate in &candidates {
             if candidate.is_file() && is_sendable_file(candidate) {
@@ -394,7 +393,8 @@ impl SessionManager {
                  fi; \
                  while true; do /usr/local/bin/codex --add-dir /home/claude/.cloudcode/contexts; \
                  echo '\\n[cloudcode] Codex exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                 sleep 3; done".to_string()
+                 sleep 3; done"
+                    .to_string()
             }
         };
         // Create session-scoped temp dir

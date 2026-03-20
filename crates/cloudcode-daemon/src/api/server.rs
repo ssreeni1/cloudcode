@@ -36,12 +36,7 @@ pub async fn run_with_state(
             while let Ok(Some(line)) = lines.next_line().await {
                 let response = match serde_json::from_str::<DaemonRequest>(&line) {
                     Ok(request) => {
-                        handlers::handle_with_state(
-                            request,
-                            &mgr,
-                            state.as_deref(),
-                        )
-                        .await
+                        handlers::handle_with_state(request, &mgr, state.as_deref()).await
                     }
                     Err(e) => DaemonResponse::Error {
                         message: format!("Invalid request: {}", e),

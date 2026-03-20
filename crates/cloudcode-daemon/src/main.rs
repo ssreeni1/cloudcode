@@ -13,7 +13,7 @@ use session::manager::SessionManager;
 use telegram::default_session::DefaultSessionStore;
 use telegram::dispatch::DaemonState;
 use telegram::question_poller;
-use telegram::sender::{ReqwestSender, TeloxideSender, TelegramSender};
+use telegram::sender::{ReqwestSender, TelegramSender, TeloxideSender};
 
 /// Check prerequisites for channels mode.
 fn channels_prerequisites_met() -> bool {
@@ -30,12 +30,11 @@ fn channels_prerequisites_met() -> bool {
         .unwrap_or(false);
 
     // 2. OAuth credentials exist
-    let creds_ok =
-        std::path::Path::new("/home/claude/.claude/.credentials.json").exists();
+    let creds_ok = std::path::Path::new("/home/claude/.claude/.credentials.json").exists();
 
     // 3. channel-telegram directory exists with node_modules
-    let channel_ok = std::path::Path::new("/home/claude/.cloudcode/channel-telegram/node_modules")
-        .exists();
+    let channel_ok =
+        std::path::Path::new("/home/claude/.cloudcode/channel-telegram/node_modules").exists();
 
     if !claude_ok {
         eprintln!("Channels mode: claude binary not found or version check failed");
