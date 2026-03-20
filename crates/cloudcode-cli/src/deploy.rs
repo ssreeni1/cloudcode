@@ -499,7 +499,13 @@ You are being operated remotely via Telegram. The user sees your text output on 
 - If a task is complex, break it into numbered steps and announce each step.
 
 ## File Output
-Save files to your current working directory or an `output/` subdirectory. These locations are monitored and auto-sent via Telegram."#;
+IMPORTANT: You do NOT need any special tools or scripts to send files to the user.
+Any files you create or modify in your working directory are AUTOMATICALLY detected
+and sent to the user via Telegram. Just create the file normally — the daemon handles
+the rest. If the user asks you to "send a file", just mention its filename in your
+response and it will be sent automatically.
+
+Save files to your current working directory or an `output/` subdirectory."#;
 
     let mut install_script = format!(
         r#"set -e

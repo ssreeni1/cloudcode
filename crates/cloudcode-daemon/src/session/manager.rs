@@ -69,6 +69,18 @@ fn snapshot_files(dirs: &[PathBuf]) -> HashMap<PathBuf, (SystemTime, u64)> {
 /// Scan the AI's response text for file paths that exist in the workspace.
 /// This handles follow-up messages like "send that file" where the file
 /// was created in a previous interaction and isn't in the new-files diff.
+/// Files that should never be auto-sent even if referenced in AI response.
+const EXCLUDED_FILENAMES: &[&str] = &[
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".gitignore",
+    ".env",
+    "Cargo.toml",
+    "Cargo.lock",
+    "package.json",
+    "package-lock.json",
+];
+
 fn extract_referenced_files(response: &str, workdir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -83,6 +95,15 @@ fn extract_referenced_files(response: &str, workdir: &Path) -> Vec<PathBuf> {
 
     for cap in FILE_RE.captures_iter(response) {
         let path_str = cap.get(1).unwrap().as_str();
+
+        // Skip instruction/config files that get mentioned conversationally
+        let filename = Path::new(path_str)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if EXCLUDED_FILENAMES.contains(&filename) {
+            continue;
+        }
 
         // Try as relative to workdir first, then as absolute
         let candidates = [
