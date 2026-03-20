@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::formatter;
 use super::sender::TelegramSender;
 use crate::session::manager::SessionManager;
 
@@ -210,22 +209,29 @@ pub async fn run_poller(
                     );
                 }
 
-                // Send to Telegram with HTML formatting
-                let escaped_name = detection
+                // Send to Telegram with HTML formatting.
+                // Truncate the question to ensure the final message fits
+                // in a single 4096-char Telegram message (avoids splitting
+                // mid-HTML-tag when chunking).
+                let escaped_question = detection
                     .question
                     .replace('&', "&amp;")
                     .replace('<', "&lt;")
                     .replace('>', "&gt;");
+                // Reserve ~200 chars for the wrapper HTML + session names
+                let max_question_len = 3800;
+                let truncated = if escaped_question.len() > max_question_len {
+                    format!("{}…", &escaped_question[..max_question_len])
+                } else {
+                    escaped_question
+                };
                 let msg = format!(
                     "\u{1f514} <b>[{}]</b> Claude is waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt; or /type {} &lt;text&gt;",
-                    session.name, escaped_name, session.name, session.name
+                    session.name, truncated, session.name, session.name
                 );
-                let chunks = formatter::chunk_message(&msg, 4096);
-                for chunk in chunks {
-                    if !chunk.trim().is_empty() {
-                        let _ = sender.send_html(owner_id, &chunk).await;
-                    }
-                }
+                // Message is guaranteed to fit in one chunk, but send_html
+                // handles chunking safely for plain text fallback
+                let _ = sender.send_html(owner_id, &msg).await;
             }
         }
     }
