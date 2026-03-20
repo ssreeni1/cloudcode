@@ -146,16 +146,36 @@ pub async fn handle_with_state(
             DaemonResponse::DefaultSession { session }
         }
         DaemonRequest::SetDefaultSession { session } => {
-            if let Some(state) = api_state {
-                if let Some(ref ds) = state.default_session {
-                    if let Err(e) = ds.set(session.clone()) {
+            // Validate session exists if setting (not clearing)
+            if let Some(ref name) = session {
+                match mgr.list().await {
+                    Ok(sessions) => {
+                        if !sessions.iter().any(|s| s.name == *name) {
+                            return DaemonResponse::Error {
+                                message: format!("Session '{}' not found", name),
+                            };
+                        }
+                    }
+                    Err(e) => {
                         return DaemonResponse::Error {
                             message: e.to_string(),
                         };
                     }
                 }
             }
-            DaemonResponse::DefaultSessionSet { session }
+            match api_state.and_then(|s| s.default_session.as_ref()) {
+                Some(ds) => {
+                    if let Err(e) = ds.set(session.clone()) {
+                        return DaemonResponse::Error {
+                            message: e.to_string(),
+                        };
+                    }
+                    DaemonResponse::DefaultSessionSet { session }
+                }
+                None => DaemonResponse::Error {
+                    message: "Default session store not available".to_string(),
+                },
+            }
         }
         DaemonRequest::Waiting => {
             let sessions = api_state
