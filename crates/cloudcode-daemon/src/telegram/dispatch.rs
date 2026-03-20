@@ -104,20 +104,20 @@ pub struct DaemonState {
 // Help text
 // ---------------------------------------------------------------------------
 
-const HELP_TEXT: &str = "🤖 *cloudcode Telegram Bot*\n\n\
-    /spawn \\[name\\] — Create a new session\n\
+const HELP_TEXT: &str = "🤖 cloudcode Telegram Bot\n\n\
+    /spawn [name] — Create a new session\n\
     /list — List active sessions\n\
-    /kill \\<name\\> — Kill a session\n\
-    /use \\<name\\> — Set default session\n\
-    /provider \\[claude\\|codex\\] — Check or switch AI provider\n\
+    /kill <name> — Kill a session\n\
+    /use <name> — Set default session\n\
+    /provider [claude|codex] — Check or switch AI provider\n\
     /waiting — List sessions waiting for input\n\
-    /reply \\[session\\] \\<text\\> — Reply to a waiting session\n\
-    /context \\[session\\] — View session context\n\
-    /peek \\[session\\] — View raw tmux pane\n\
-    /type \\[session\\] \\<text\\> — Type into tmux session\n\
+    /reply [session] <text> — Reply to a waiting session\n\
+    /context [session] — View session context\n\
+    /peek [session] — View raw tmux pane\n\
+    /type [session] <text> — Type into tmux session\n\
     /status — Show daemon status\n\n\
-    Waiting prompts are routed with /reply, not ordinary chat text\\.\n\
-    Send any text to interact with the default session\\.";
+    Waiting prompts are routed with /reply, not ordinary chat text.\n\
+    Send any text to interact with the default session.";
 
 // ---------------------------------------------------------------------------
 // Command routing
@@ -153,7 +153,7 @@ pub async fn help_logic(state: &DaemonState) -> DispatchResult {
     let mut result = DispatchResult {
         messages: vec![DispatchMessage {
             text: HELP_TEXT.to_string(),
-            format: MessageFormat::Html, // MarkdownV2 for teloxide, but dispatch sends as-is
+            format: MessageFormat::Plain,
         }],
         files: vec![],
     };

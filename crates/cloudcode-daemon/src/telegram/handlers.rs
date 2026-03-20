@@ -83,16 +83,9 @@ async fn send_dispatch_result(
                 send_text(bot, msg.chat.id, &dispatch_msg.text).await?;
             }
             MessageFormat::Html => {
-                // Help text uses MarkdownV2 format for teloxide
-                if dispatch_msg.text.contains("\\[") || dispatch_msg.text.contains("\\.") {
-                    bot.send_message(msg.chat.id, &dispatch_msg.text)
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .await?;
-                } else {
-                    bot.send_message(msg.chat.id, &dispatch_msg.text)
-                        .parse_mode(ParseMode::Html)
-                        .await?;
-                }
+                bot.send_message(msg.chat.id, &dispatch_msg.text)
+                    .parse_mode(ParseMode::Html)
+                    .await?;
             }
             MessageFormat::Markdown => {
                 send_markdownish(bot, msg.chat.id, &dispatch_msg.text).await?;
