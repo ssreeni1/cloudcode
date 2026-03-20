@@ -1,6 +1,13 @@
 use crate::session::manager::SessionManager;
 use crate::session::monitor::SessionMonitor;
-use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
+use crate::telegram::default_session::DefaultSessionStore;
+use crate::telegram::handlers::provider_has_auth;
+use crate::telegram::question_poller::QuestionStates;
+use crate::telegram::session_resolution::waiting_sessions_from;
+use cloudcode_common::protocol::{
+    DaemonRequest, DaemonResponse, TelegramStatus, WaitingSession,
+};
+use cloudcode_common::provider::AiProvider;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +22,25 @@ pub fn init_start_time() {
     });
 }
 
+/// Extended state for API handlers that need access to Telegram state
+pub struct ApiState {
+    #[allow(dead_code)]
+    pub session_mgr: Arc<SessionManager>,
+    pub default_session: Option<Arc<DefaultSessionStore>>,
+    pub question_states: Option<QuestionStates>,
+    pub telegram_mode: Option<String>,
+}
+
+#[allow(dead_code)]
 pub async fn handle(request: DaemonRequest, mgr: &Arc<SessionManager>) -> DaemonResponse {
+    handle_with_state(request, mgr, None).await
+}
+
+pub async fn handle_with_state(
+    request: DaemonRequest,
+    mgr: &Arc<SessionManager>,
+    api_state: Option<&ApiState>,
+) -> DaemonResponse {
     match request {
         DaemonRequest::Spawn { name } => match mgr.spawn(name).await {
             Ok(session) => DaemonResponse::Spawned { session },
@@ -64,15 +89,85 @@ pub async fn handle(request: DaemonRequest, mgr: &Arc<SessionManager>) -> Daemon
                 .as_secs();
             let start = *START_TIME.get_or_init(|| now);
             let uptime_secs = now - start;
+            let telegram = api_state.and_then(|s| {
+                s.telegram_mode.as_ref().map(|mode| TelegramStatus {
+                    mode: mode.clone(),
+                    connected: true,
+                })
+            });
             match mgr.list().await {
                 Ok(sessions) => DaemonResponse::Status {
                     uptime_secs,
                     sessions,
+                    telegram,
                 },
                 Err(e) => DaemonResponse::Error {
                     message: e.to_string(),
                 },
             }
+        }
+        DaemonRequest::Peek { session } => match mgr.capture_pane(&session).await {
+            Ok(content) => DaemonResponse::PaneContent { session, content },
+            Err(e) => DaemonResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        DaemonRequest::Type { session, text } => match mgr.send_keys(&session, &text).await {
+            Ok(()) => DaemonResponse::Typed { session },
+            Err(e) => DaemonResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        DaemonRequest::SetProvider { provider } => {
+            let target: AiProvider = match provider.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    return DaemonResponse::Error {
+                        message: format!("Unknown provider: {}", provider),
+                    }
+                }
+            };
+            mgr.set_provider(target);
+            DaemonResponse::ProviderSet {
+                provider: target.as_str().to_string(),
+            }
+        }
+        DaemonRequest::GetProvider => {
+            let provider = mgr.current_provider();
+            DaemonResponse::Provider {
+                provider: provider.as_str().to_string(),
+                has_auth: provider_has_auth(provider),
+            }
+        }
+        DaemonRequest::GetDefaultSession => {
+            let session = api_state
+                .and_then(|s| s.default_session.as_ref())
+                .and_then(|ds| ds.current());
+            DaemonResponse::DefaultSession { session }
+        }
+        DaemonRequest::SetDefaultSession { session } => {
+            if let Some(state) = api_state {
+                if let Some(ref ds) = state.default_session {
+                    if let Err(e) = ds.set(session.clone()) {
+                        return DaemonResponse::Error {
+                            message: e.to_string(),
+                        };
+                    }
+                }
+            }
+            DaemonResponse::DefaultSessionSet { session }
+        }
+        DaemonRequest::Waiting => {
+            let sessions = api_state
+                .and_then(|s| s.question_states.as_ref())
+                .map(|qs| {
+                    waiting_sessions_from(qs)
+                        .into_iter()
+                        .map(|(name, question)| WaitingSession { name, question })
+                        .collect()
+                })
+                .unwrap_or_default();
+            DaemonResponse::WaitingSessions { sessions }
         }
     }
 }
@@ -88,16 +183,12 @@ mod tests {
 
     #[test]
     fn init_start_time_does_not_panic() {
-        // init_start_time uses OnceLock so it can be called multiple times safely
         init_start_time();
         init_start_time(); // second call is a no-op
     }
 
     // -----------------------------------------------------------------------
     // Handler dispatch — error paths (tmux is not available in test env)
-    //
-    // SessionManager methods shell out to tmux, which will fail in CI/test.
-    // We verify that failures are properly mapped to DaemonResponse::Error.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -108,12 +199,8 @@ mod tests {
         };
         let resp = handle(req, &mgr).await;
 
-        // tmux is likely not installed or has no server running in test env,
-        // so we expect an Error response (not a panic).
         match resp {
             DaemonResponse::Spawned { .. } => {
-                // If tmux happens to be available, spawned is also acceptable.
-                // Clean up: kill the session we just created.
                 let _ = mgr.kill("test-session").await;
             }
             DaemonResponse::Error { message } => {
@@ -131,8 +218,6 @@ mod tests {
 
         match resp {
             DaemonResponse::Sessions { sessions } => {
-                // Even if tmux is not running, list() returns Ok(vec![])
-                // when tmux returns an error (no sessions).
                 assert!(sessions.is_empty() || !sessions.is_empty());
             }
             DaemonResponse::Error { message } => {
@@ -152,7 +237,6 @@ mod tests {
 
         match resp {
             DaemonResponse::Error { message } => {
-                // The session does not exist, so we expect an error
                 assert!(
                     message.contains("does not exist") || !message.is_empty(),
                     "Error should indicate session not found, got: {}",
@@ -183,7 +267,6 @@ mod tests {
     #[tokio::test]
     async fn handle_status_returns_status_or_error() {
         let mgr = Arc::new(SessionManager::new(AiProvider::default()));
-        // Ensure START_TIME is initialized so uptime calculation works
         init_start_time();
 
         let req = DaemonRequest::Status;
@@ -193,10 +276,9 @@ mod tests {
             DaemonResponse::Status {
                 uptime_secs,
                 sessions,
+                ..
             } => {
-                // Uptime should be zero or small since we just initialized
                 assert!(uptime_secs < 60, "Uptime should be small in test");
-                // Sessions list is valid (possibly empty)
                 let _ = sessions;
             }
             DaemonResponse::Error { message } => {
@@ -207,8 +289,87 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Verify handler maps each request variant to the correct response variant
-    // by checking the JSON "type" tag of the response.
+    // New request types
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_get_provider_returns_provider() {
+        let mgr = Arc::new(SessionManager::new(AiProvider::Claude));
+        let req = DaemonRequest::GetProvider;
+        let resp = handle(req, &mgr).await;
+
+        match resp {
+            DaemonResponse::Provider { provider, .. } => {
+                assert_eq!(provider, "claude");
+            }
+            other => panic!("Expected Provider, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_set_provider_switches_provider() {
+        let mgr = Arc::new(SessionManager::new(AiProvider::Claude));
+        let req = DaemonRequest::SetProvider {
+            provider: "codex".to_string(),
+        };
+        let resp = handle(req, &mgr).await;
+
+        match resp {
+            DaemonResponse::ProviderSet { provider } => {
+                assert_eq!(provider, "codex");
+            }
+            other => panic!("Expected ProviderSet, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_set_provider_invalid_returns_error() {
+        let mgr = Arc::new(SessionManager::new(AiProvider::Claude));
+        let req = DaemonRequest::SetProvider {
+            provider: "invalid".to_string(),
+        };
+        let resp = handle(req, &mgr).await;
+
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(message.contains("Unknown provider"));
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_waiting_returns_empty_without_state() {
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
+        let req = DaemonRequest::Waiting;
+        let resp = handle(req, &mgr).await;
+
+        match resp {
+            DaemonResponse::WaitingSessions { sessions } => {
+                assert!(sessions.is_empty());
+            }
+            other => panic!("Expected WaitingSessions, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_peek_nonexistent_returns_error() {
+        let mgr = Arc::new(SessionManager::new(AiProvider::default()));
+        let req = DaemonRequest::Peek {
+            session: "nonexistent".to_string(),
+        };
+        let resp = handle(req, &mgr).await;
+
+        match resp {
+            DaemonResponse::Error { message } => {
+                assert!(!message.is_empty());
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON type tag verification
     // -----------------------------------------------------------------------
 
     #[tokio::test]

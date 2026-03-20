@@ -426,8 +426,8 @@ pub fn install_daemon(state: &VpsState, config: &crate::config::Config) -> Resul
     let mut daemon_toml = String::from("listen_addr = \"127.0.0.1\"\nlisten_port = 7700\n");
     if let Some(ref tg) = config.telegram {
         daemon_toml.push_str(&format!(
-            "\n[telegram]\nbot_token = \"{}\"\nowner_id = {}\n",
-            tg.bot_token, tg.owner_id
+            "\n[telegram]\nbot_token = \"{}\"\nowner_id = {}\nmode = \"{}\"\n",
+            tg.bot_token, tg.owner_id, tg.mode
         ));
     }
 

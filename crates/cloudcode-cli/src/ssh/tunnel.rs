@@ -369,6 +369,7 @@ mod tests {
             DaemonResponse::Status {
                 uptime_secs,
                 sessions,
+                ..
             } => {
                 assert_eq!(uptime_secs, 120);
                 assert!(sessions.is_empty());

@@ -8,8 +8,47 @@ use cloudcode_common::provider::AiProvider;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use config::TelegramMode;
 use session::manager::SessionManager;
+use telegram::default_session::DefaultSessionStore;
+use telegram::dispatch::DaemonState;
 use telegram::question_poller;
+use telegram::sender::{ReqwestSender, TeloxideSender, TelegramSender};
+
+/// Check prerequisites for channels mode.
+fn channels_prerequisites_met() -> bool {
+    // 1. claude binary exists, version >= 2.1.80
+    let claude_ok = std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| {
+            let version = String::from_utf8_lossy(&o.stdout);
+            // Accept any version that contains a version string (basic check)
+            o.status.success() && !version.trim().is_empty()
+        })
+        .unwrap_or(false);
+
+    // 2. OAuth credentials exist
+    let creds_ok =
+        std::path::Path::new("/home/claude/.claude/.credentials.json").exists();
+
+    // 3. channel-telegram directory exists with node_modules
+    let channel_ok = std::path::Path::new("/home/claude/.cloudcode/channel-telegram/node_modules")
+        .exists();
+
+    if !claude_ok {
+        eprintln!("Channels mode: claude binary not found or version check failed");
+    }
+    if !creds_ok {
+        eprintln!("Channels mode: OAuth credentials not found at ~/.claude/.credentials.json");
+    }
+    if !channel_ok {
+        eprintln!("Channels mode: channel-telegram/node_modules not found");
+    }
+
+    claude_ok && creds_ok && channel_ok
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -58,48 +97,151 @@ async fn main() -> Result<()> {
     // Create shared question states for automatic question forwarding
     let question_states = question_poller::new_question_states();
 
+    // Load default session store
+    let default_session = match DefaultSessionStore::load() {
+        Ok(store) => Arc::new(store),
+        Err(err) => {
+            log::warn!(
+                "Failed to load persisted Telegram default session, starting empty: {}",
+                err
+            );
+            Arc::new(DefaultSessionStore::empty())
+        }
+    };
+
+    // Determine Telegram mode and start the appropriate subsystem
+    let telegram_mode_str;
+
     if let Some(ref tg_config) = config.telegram {
-        let mgr = Arc::clone(&session_mgr);
-        let tg = tg_config.clone();
-        let states = question_states.clone();
-
-        // Create bot and clone for poller before passing to dispatcher
-        let bot = teloxide::Bot::new(&tg.bot_token);
-        let poller_bot = bot.clone();
-        let poller_mgr = Arc::clone(&session_mgr);
-        let poller_states = question_states.clone();
-        let owner_id = teloxide::types::ChatId(tg.owner_id);
-
-        // Spawn question poller (delayed to let network stabilize)
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            question_poller::run_poller(poller_mgr, poller_bot, owner_id, poller_states).await;
-        });
-
-        // Run telegram bot with retry — DNS may not be ready on fresh VPS.
-        // teloxide panics on network errors during init, so we catch panics.
-        tokio::spawn(async move {
-            for attempt in 1..=5 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                log::info!("Starting Telegram bot (attempt {}/5)...", attempt);
-                let bot_c = bot.clone();
-                let tg_c = tg.clone();
-                let mgr_c = mgr.clone();
-                let states_c = states.clone();
-                let result = tokio::spawn(async move {
-                    telegram::bot::run_with_bot(bot_c, &tg_c, mgr_c, states_c).await;
-                })
-                .await;
-                match result {
-                    Ok(()) => log::warn!("Telegram bot exited cleanly"),
-                    Err(e) => log::warn!("Telegram bot panicked: {}", e),
+        let effective_mode = match tg_config.mode {
+            TelegramMode::Channels => {
+                if channels_prerequisites_met() {
+                    TelegramMode::Channels
+                } else {
+                    eprintln!("ERROR: Channels mode requested but prerequisites not met");
+                    std::process::exit(1);
                 }
-                log::info!("Retrying Telegram bot in 10s...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
             }
-            log::error!("Telegram bot failed after 5 attempts");
-        });
+            TelegramMode::Auto => {
+                if channels_prerequisites_met() {
+                    eprintln!("Auto mode: channels prerequisites met, using channels mode");
+                    TelegramMode::Channels
+                } else {
+                    eprintln!("Auto mode: channels prerequisites not met, falling back to legacy");
+                    TelegramMode::Legacy
+                }
+            }
+            TelegramMode::Legacy => TelegramMode::Legacy,
+        };
+
+        telegram_mode_str = effective_mode.to_string();
+        eprintln!("Telegram mode: {}", telegram_mode_str);
+
+        match effective_mode {
+            TelegramMode::Channels => {
+                // Channels mode: dispatch HTTP server + reqwest sender + question poller
+                let sender: Arc<dyn TelegramSender> =
+                    Arc::new(ReqwestSender::new(&tg_config.bot_token));
+
+                let daemon_state = Arc::new(DaemonState {
+                    session_mgr: Arc::clone(&session_mgr),
+                    default_session: Arc::clone(&default_session),
+                    question_states: question_states.clone(),
+                });
+
+                // Spawn question poller with reqwest sender
+                let poller_mgr = Arc::clone(&session_mgr);
+                let poller_sender = Arc::clone(&sender);
+                let poller_owner_id = tg_config.owner_id;
+                let poller_states = question_states.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    question_poller::run_poller(
+                        poller_mgr,
+                        poller_sender,
+                        poller_owner_id,
+                        poller_states,
+                    )
+                    .await;
+                });
+
+                // Spawn dispatch HTTP server
+                let dispatch_sender = Arc::clone(&sender);
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        telegram::dispatch_server::run(daemon_state, dispatch_sender).await
+                    {
+                        log::error!("Dispatch server failed: {}", e);
+                    }
+                });
+            }
+            TelegramMode::Legacy => {
+                // Legacy mode: teloxide bot + question poller (original behavior)
+                let mgr = Arc::clone(&session_mgr);
+                let tg = tg_config.clone();
+                let states = question_states.clone();
+
+                let bot = teloxide::Bot::new(&tg.bot_token);
+
+                // Spawn question poller with teloxide sender wrapper
+                let poller_sender: Arc<dyn TelegramSender> =
+                    Arc::new(TeloxideSender::new(bot.clone()));
+                let poller_mgr = Arc::clone(&session_mgr);
+                let poller_owner_id = tg.owner_id;
+                let poller_states = question_states.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    question_poller::run_poller(
+                        poller_mgr,
+                        poller_sender,
+                        poller_owner_id,
+                        poller_states,
+                    )
+                    .await;
+                });
+
+                // Run telegram bot with retry
+                tokio::spawn(async move {
+                    for attempt in 1..=5 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        log::info!("Starting Telegram bot (attempt {}/5)...", attempt);
+                        let bot_c = bot.clone();
+                        let tg_c = tg.clone();
+                        let mgr_c = mgr.clone();
+                        let states_c = states.clone();
+                        let result = tokio::spawn(async move {
+                            telegram::bot::run_with_bot(bot_c, &tg_c, mgr_c, states_c).await;
+                        })
+                        .await;
+                        match result {
+                            Ok(()) => log::warn!("Telegram bot exited cleanly"),
+                            Err(e) => log::warn!("Telegram bot panicked: {}", e),
+                        }
+                        log::info!("Retrying Telegram bot in 10s...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    }
+                    log::error!("Telegram bot failed after 5 attempts");
+                });
+            }
+            TelegramMode::Auto => unreachable!("Auto resolved above"),
+        }
+    } else {
+        telegram_mode_str = "disabled".to_string();
     }
 
-    api::server::run(&config.listen_addr, config.listen_port, session_mgr).await
+    // Build ApiState for the control server
+    let api_state = Arc::new(api::handlers::ApiState {
+        session_mgr: Arc::clone(&session_mgr),
+        default_session: Some(Arc::clone(&default_session)),
+        question_states: Some(question_states),
+        telegram_mode: Some(telegram_mode_str),
+    });
+
+    api::server::run_with_state(
+        &config.listen_addr,
+        config.listen_port,
+        session_mgr,
+        Some(api_state),
+    )
+    .await
 }

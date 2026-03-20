@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use super::bot::BotState;
-use super::question_poller::SessionQuestionState;
+use super::default_session::DefaultSessionStore;
+use super::question_poller::{QuestionStates, SessionQuestionState};
+use crate::session::manager::SessionManager;
 
 pub enum FreeTextSessionTarget {
     Selected { name: String, auto_selected: bool },
@@ -20,8 +21,12 @@ pub enum ReplyTarget {
     Ambiguous(Vec<(String, String)>),
 }
 
-pub fn waiting_sessions(state: &Arc<BotState>) -> Vec<(String, String)> {
-    let states = state.question_states.lock().unwrap();
+// ---------------------------------------------------------------------------
+// Decoupled helpers (used by dispatch logic — no BotState dependency)
+// ---------------------------------------------------------------------------
+
+pub fn waiting_sessions_from(states: &QuestionStates) -> Vec<(String, String)> {
+    let states = states.lock().unwrap();
     states
         .iter()
         .filter_map(|(name, session_state)| {
@@ -34,31 +39,32 @@ pub fn waiting_sessions(state: &Arc<BotState>) -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn clear_waiting_state(state: &Arc<BotState>, session: &str) {
-    let mut states = state.question_states.lock().unwrap();
+pub fn clear_waiting_state_from(states: &QuestionStates, session: &str) {
+    let mut states = states.lock().unwrap();
     states.insert(session.to_string(), SessionQuestionState::Idle);
 }
 
-pub async fn session_exists(state: &Arc<BotState>, name: &str) -> Result<bool> {
-    let sessions = state.session_mgr.list().await?;
+pub async fn session_exists_with(mgr: &Arc<SessionManager>, name: &str) -> Result<bool> {
+    let sessions = mgr.list().await?;
     Ok(sessions.iter().any(|session| session.name == name))
 }
 
-pub async fn resolve_command_session(
-    state: &Arc<BotState>,
+pub async fn resolve_command_session_with(
+    mgr: &Arc<SessionManager>,
+    default_session: &Arc<DefaultSessionStore>,
     explicit: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(name) = explicit.filter(|name| !name.trim().is_empty()) {
         return Ok(Some(name.to_string()));
     }
 
-    match state.default_session.current() {
+    match default_session.current() {
         Some(name) => {
-            let sessions = state.session_mgr.list().await?;
+            let sessions = mgr.list().await?;
             if sessions.iter().any(|session| session.name == name) {
                 Ok(Some(name))
             } else {
-                if let Err(err) = state.default_session.clear() {
+                if let Err(err) = default_session.clear() {
                     log::warn!(
                         "Failed to clear stale persisted Telegram default session: {}",
                         err
@@ -71,15 +77,18 @@ pub async fn resolve_command_session(
     }
 }
 
-pub async fn resolve_free_text_session(state: &Arc<BotState>) -> Result<FreeTextSessionTarget> {
-    if let Some(name) = resolve_command_session(state, None).await? {
+pub async fn resolve_free_text_session_with(
+    mgr: &Arc<SessionManager>,
+    default_session: &Arc<DefaultSessionStore>,
+) -> Result<FreeTextSessionTarget> {
+    if let Some(name) = resolve_command_session_with(mgr, default_session, None).await? {
         return Ok(FreeTextSessionTarget::Selected {
             name,
             auto_selected: false,
         });
     }
 
-    let sessions = state.session_mgr.list().await?;
+    let sessions = mgr.list().await?;
     match sessions.len() {
         0 => Ok(FreeTextSessionTarget::NoSessions),
         1 => {
@@ -95,8 +104,11 @@ pub async fn resolve_free_text_session(state: &Arc<BotState>) -> Result<FreeText
     }
 }
 
-pub async fn resolve_reply_target(state: &Arc<BotState>, args: &str) -> Result<ReplyTarget> {
-    let waiting = waiting_sessions(state);
+pub async fn resolve_reply_target_with(
+    question_states: &QuestionStates,
+    args: &str,
+) -> Result<ReplyTarget> {
+    let waiting = waiting_sessions_from(question_states);
     if waiting.is_empty() {
         return Ok(ReplyTarget::NoneWaiting);
     }
@@ -121,8 +133,9 @@ pub async fn resolve_reply_target(state: &Arc<BotState>, args: &str) -> Result<R
     }
 }
 
-pub async fn resolve_type_target(
-    state: &Arc<BotState>,
+pub async fn resolve_type_target_with(
+    mgr: &Arc<SessionManager>,
+    default_session: &Arc<DefaultSessionStore>,
     args: &str,
 ) -> Result<Option<(String, String)>> {
     if args.trim().is_empty() {
@@ -130,11 +143,11 @@ pub async fn resolve_type_target(
     }
 
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
-    if parts.len() == 2 && session_exists(state, parts[0]).await? {
+    if parts.len() == 2 && session_exists_with(mgr, parts[0]).await? {
         return Ok(Some((parts[0].to_string(), parts[1].to_string())));
     }
 
-    Ok(resolve_command_session(state, None)
+    Ok(resolve_command_session_with(mgr, default_session, None)
         .await?
         .map(|name| (name, args.to_string())))
 }

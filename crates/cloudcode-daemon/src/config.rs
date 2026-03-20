@@ -11,10 +11,36 @@ pub struct DaemonConfig {
     pub telegram: Option<TelegramConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramMode {
+    Legacy,
+    Channels,
+    Auto,
+}
+
+impl Default for TelegramMode {
+    fn default() -> Self {
+        Self::Legacy
+    }
+}
+
+impl std::fmt::Display for TelegramMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Legacy => write!(f, "legacy"),
+            Self::Channels => write!(f, "channels"),
+            Self::Auto => write!(f, "auto"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramConfig {
     pub bot_token: String,
     pub owner_id: i64,
+    #[serde(default)]
+    pub mode: TelegramMode,
 }
 
 impl Default for DaemonConfig {
@@ -178,6 +204,7 @@ mod tests {
             telegram: Some(TelegramConfig {
                 bot_token: "abc:xyz".to_string(),
                 owner_id: 12345,
+                mode: TelegramMode::default(),
             }),
         };
         let serialized = toml::to_string(&config).unwrap();
@@ -368,5 +395,77 @@ mod tests {
         assert!(!DaemonConfig::is_loopback("192.168.1.1"));
         assert!(!DaemonConfig::is_loopback(""));
         assert!(!DaemonConfig::is_loopback("localhost"));
+    }
+
+    // -----------------------------------------------------------------------
+    // TelegramMode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn telegram_mode_default_is_legacy() {
+        assert_eq!(TelegramMode::default(), TelegramMode::Legacy);
+    }
+
+    #[test]
+    fn telegram_mode_display() {
+        assert_eq!(TelegramMode::Legacy.to_string(), "legacy");
+        assert_eq!(TelegramMode::Channels.to_string(), "channels");
+        assert_eq!(TelegramMode::Auto.to_string(), "auto");
+    }
+
+    #[test]
+    fn telegram_mode_toml_roundtrip() {
+        let config = DaemonConfig {
+            listen_addr: "127.0.0.1".to_string(),
+            listen_port: 7700,
+            telegram: Some(TelegramConfig {
+                bot_token: "tok".to_string(),
+                owner_id: 42,
+                mode: TelegramMode::Channels,
+            }),
+        };
+        let serialized = toml::to_string(&config).unwrap();
+        let deserialized: DaemonConfig = toml::from_str(&serialized).unwrap();
+        let tg = deserialized.telegram.unwrap();
+        assert_eq!(tg.mode, TelegramMode::Channels);
+    }
+
+    #[test]
+    fn telegram_mode_defaults_to_legacy_when_omitted() {
+        let toml_str = r#"
+            listen_addr = "127.0.0.1"
+            listen_port = 7700
+
+            [telegram]
+            bot_token = "tok"
+            owner_id = 42
+        "#;
+        let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+        let tg = config.telegram.unwrap();
+        assert_eq!(tg.mode, TelegramMode::Legacy);
+    }
+
+    #[test]
+    fn telegram_mode_parses_all_variants() {
+        for (mode_str, expected) in [
+            ("legacy", TelegramMode::Legacy),
+            ("channels", TelegramMode::Channels),
+            ("auto", TelegramMode::Auto),
+        ] {
+            let toml_str = format!(
+                r#"
+                listen_addr = "127.0.0.1"
+                listen_port = 7700
+
+                [telegram]
+                bot_token = "tok"
+                owner_id = 42
+                mode = "{}"
+            "#,
+                mode_str
+            );
+            let config: DaemonConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(config.telegram.unwrap().mode, expected);
+        }
     }
 }

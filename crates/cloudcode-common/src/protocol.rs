@@ -11,6 +11,25 @@ pub enum DaemonRequest {
     Send { session: String, message: String },
     Status,
     Cleanup,
+    Peek { session: String },
+    Type { session: String, text: String },
+    SetProvider { provider: String },
+    GetProvider,
+    GetDefaultSession,
+    SetDefaultSession { session: Option<String> },
+    Waiting,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitingSession {
+    pub name: String,
+    pub question: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramStatus {
+    pub mode: String,
+    pub connected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,9 +52,34 @@ pub enum DaemonResponse {
     Status {
         uptime_secs: u64,
         sessions: Vec<SessionInfo>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        telegram: Option<TelegramStatus>,
     },
     CleanedUp {
         sessions: Vec<String>,
+    },
+    PaneContent {
+        session: String,
+        content: String,
+    },
+    Typed {
+        session: String,
+    },
+    ProviderSet {
+        provider: String,
+    },
+    Provider {
+        provider: String,
+        has_auth: bool,
+    },
+    DefaultSession {
+        session: Option<String>,
+    },
+    DefaultSessionSet {
+        session: Option<String>,
+    },
+    WaitingSessions {
+        sessions: Vec<WaitingSession>,
     },
     Error {
         message: String,

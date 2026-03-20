@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use teloxide::prelude::*;
-use teloxide::types::ChatId;
 
 use super::formatter;
+use super::sender::TelegramSender;
 use crate::session::manager::SessionManager;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,10 +98,11 @@ fn content_hash(s: &str) -> u64 {
 }
 
 /// Run the background poller that watches tmux sessions for questions.
+/// Accepts a TelegramSender trait object instead of teloxide Bot directly.
 pub async fn run_poller(
     session_mgr: Arc<SessionManager>,
-    bot: Bot,
-    owner_id: ChatId,
+    sender: Arc<dyn TelegramSender>,
+    owner_id: i64,
     states: QuestionStates,
 ) {
     log::info!("Question poller started");
@@ -223,10 +223,7 @@ pub async fn run_poller(
                 let chunks = formatter::chunk_message(&msg, 4096);
                 for chunk in chunks {
                     if !chunk.trim().is_empty() {
-                        let _ = bot
-                            .send_message(owner_id, &chunk)
-                            .parse_mode(teloxide::types::ParseMode::Html)
-                            .await;
+                        let _ = sender.send_html(owner_id, &chunk).await;
                     }
                 }
             }
@@ -302,14 +299,12 @@ mod tests {
         lines.push("Do you want to continue?".to_string());
         let content = lines.join("\n");
         let result = detect_question(&content).unwrap();
-        // Should contain "line 12" through "line 30" plus the question (last 20 non-empty)
         assert!(result.question.contains("Do you want to continue?"));
-        assert!(!result.question.contains("line 1\n")); // line 1 should be excluded (beyond 20)
+        assert!(!result.question.contains("line 1\n"));
     }
 
     #[test]
     fn test_detect_question_only_checks_last_5_lines() {
-        // Question mark is on line 1, but last 5 lines have no pattern
         let content = "Is this a question?\nNo pattern here\nJust output\nMore output\nStill going\nDone building\nAll complete";
         assert!(detect_question(content).is_none());
     }
@@ -343,13 +338,11 @@ mod tests {
     fn test_question_state_transitions() {
         let states = new_question_states();
 
-        // Start idle
         {
             let mut lock = states.lock().unwrap();
             lock.insert("test".to_string(), SessionQuestionState::Idle);
         }
 
-        // Transition to WaitingForInput
         {
             let mut lock = states.lock().unwrap();
             lock.insert(
@@ -361,7 +354,6 @@ mod tests {
             );
         }
 
-        // Verify it's WaitingForInput
         {
             let lock = states.lock().unwrap();
             assert!(matches!(
@@ -370,13 +362,11 @@ mod tests {
             ));
         }
 
-        // Transition back to Idle
         {
             let mut lock = states.lock().unwrap();
             lock.insert("test".to_string(), SessionQuestionState::Idle);
         }
 
-        // Verify it's Idle
         {
             let lock = states.lock().unwrap();
             assert!(matches!(lock.get("test"), Some(SessionQuestionState::Idle)));
@@ -387,7 +377,6 @@ mod tests {
     fn test_question_state_timeout_detection() {
         let states = new_question_states();
 
-        // Insert a state with a past instant (simulate expired)
         {
             let mut lock = states.lock().unwrap();
             lock.insert(
@@ -406,7 +395,6 @@ mod tests {
             );
         }
 
-        // Check which ones are expired (>300 seconds)
         let expired: Vec<String> = {
             let lock = states.lock().unwrap();
             lock.iter()

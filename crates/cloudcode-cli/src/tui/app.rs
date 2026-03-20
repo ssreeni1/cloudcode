@@ -718,6 +718,7 @@ impl App {
                             self.config.telegram = Some(TelegramConfig {
                                 bot_token: token,
                                 owner_id,
+                                mode: Default::default(),
                             });
                             self.start_generating();
                         }

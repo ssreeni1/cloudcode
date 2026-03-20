@@ -148,6 +148,7 @@ pub async fn run() -> Result<()> {
             Ok(DaemonResponse::Status {
                 uptime_secs,
                 sessions,
+                telegram,
             }) => {
                 println!(
                     "  {:<12} {} (uptime: {})",
@@ -169,6 +170,18 @@ pub async fn run() -> Result<()> {
                         "    {} [{}]",
                         s.name.green(),
                         format!("{:?}", s.state).yellow()
+                    );
+                }
+                if let Some(tg) = telegram {
+                    println!(
+                        "  {:<12} {} (mode: {})",
+                        "Telegram:".bold(),
+                        if tg.connected {
+                            "connected".green().to_string()
+                        } else {
+                            "disconnected".yellow().to_string()
+                        },
+                        tg.mode.dimmed()
                     );
                 }
             }

@@ -1,0 +1,13 @@
+{
+  "name": "cloudcode-channel-telegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "start": "npx tsx index.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0"
+  }
+}

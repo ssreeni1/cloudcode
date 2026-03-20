@@ -5,6 +5,7 @@ use std::process::Command as ProcessCommand;
 
 use crate::config::{
     AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig,
+    TelegramMode,
 };
 use crate::hetzner::client::HetznerClient;
 
@@ -345,15 +346,36 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
                 .with_prompt("Enter your Telegram user ID")
                 .interact_text()?;
 
+            // Telegram mode selection
+            let mode_options = vec![
+                "Legacy (teloxide bot — default, most compatible)",
+                "Channels (Claude Code Channel + reqwest — requires Claude CLI >= 2.1.80)",
+                "Auto (try channels, fall back to legacy)",
+            ];
+            let mode_selection = Select::new()
+                .with_prompt("Which Telegram transport mode?")
+                .items(&mode_options)
+                .default(0)
+                .interact()?;
+
+            let mode = match mode_selection {
+                0 => TelegramMode::Legacy,
+                1 => TelegramMode::Channels,
+                2 => TelegramMode::Auto,
+                _ => unreachable!(),
+            };
+
             println!(
-                "  {} Telegram configured (bot: {})",
+                "  {} Telegram configured (bot: {}, mode: {})",
                 "✓".green().bold(),
-                mask_secret(&bot_token).dimmed()
+                mask_secret(&bot_token).dimmed(),
+                mode
             );
 
             config.telegram = Some(TelegramConfig {
                 bot_token,
                 owner_id,
+                mode,
             });
 
             println!("\n  {}", "How to use Telegram with cloudcode:".bold());

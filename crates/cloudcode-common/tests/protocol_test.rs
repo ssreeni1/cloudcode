@@ -363,6 +363,7 @@ mod daemon_response {
         let resp = DaemonResponse::Status {
             uptime_secs: 3600,
             sessions: vec![sample_session()],
+            telegram: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
@@ -371,6 +372,7 @@ mod daemon_response {
             DaemonResponse::Status {
                 uptime_secs,
                 sessions,
+                ..
             } => {
                 assert_eq!(uptime_secs, 3600);
                 assert_eq!(sessions.len(), 1);
@@ -384,6 +386,7 @@ mod daemon_response {
         let resp = DaemonResponse::Status {
             uptime_secs: 0,
             sessions: vec![],
+            telegram: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -397,6 +400,7 @@ mod daemon_response {
         let resp = DaemonResponse::Status {
             uptime_secs: 0,
             sessions: vec![],
+            telegram: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
@@ -405,6 +409,7 @@ mod daemon_response {
             DaemonResponse::Status {
                 uptime_secs,
                 sessions,
+                ..
             } => {
                 assert_eq!(uptime_secs, 0);
                 assert!(sessions.is_empty());
@@ -418,6 +423,7 @@ mod daemon_response {
         let resp = DaemonResponse::Status {
             uptime_secs: u64::MAX,
             sessions: vec![],
+            telegram: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
@@ -561,6 +567,7 @@ mod newline_delimited_protocol {
             DaemonResponse::Status {
                 uptime_secs: 60,
                 sessions: vec![],
+                telegram: None,
             },
             DaemonResponse::Error {
                 message: "fail".to_string(),
