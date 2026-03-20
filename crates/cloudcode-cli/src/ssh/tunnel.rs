@@ -15,6 +15,8 @@ use crate::state::VpsState;
 pub struct DaemonClient {
     tunnel: Option<Child>,
     socket_path: PathBuf,
+    server_ip: String,
+    server_id: u64,
 }
 
 impl DaemonClient {
@@ -24,66 +26,14 @@ impl DaemonClient {
         let server_id = state.server_id.context("No server ID")?;
         let socket_path = daemon_socket_path(server_id)?;
 
-        // Clean up stale socket
-        let _ = std::fs::remove_file(&socket_path);
-
-        // Build SSH args — deliberately bypass ControlMaster so the -L
-        // forwarding runs on a dedicated connection.
-        // IMPORTANT: SSH uses first-match-wins for -o options, so we must
-        // filter out ControlMaster/ControlPath/ControlPersist from base args
-        // rather than appending overrides (which would be ignored).
-        let base_args = ssh_base_args(ip)?;
-        let mut args: Vec<String> = Vec::new();
-        let mut skip_next = false;
-        for (i, arg) in base_args.iter().enumerate() {
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if arg == "-o" {
-                if let Some(next) = base_args.get(i + 1) {
-                    if next.starts_with("ControlMaster=")
-                        || next.starts_with("ControlPath=")
-                        || next.starts_with("ControlPersist=")
-                    {
-                        skip_next = true;
-                        continue;
-                    }
-                }
-            }
-            args.push(arg.clone());
-        }
-        args.extend([
-            "-o".to_string(),
-            "ControlMaster=no".to_string(),
-            "-o".to_string(),
-            "ControlPath=none".to_string(),
-            "-o".to_string(),
-            "ControlPersist=no".to_string(),
-            "-N".to_string(), // no remote command
-            "-o".to_string(),
-            "ExitOnForwardFailure=yes".to_string(),
-            "-o".to_string(),
-            "StreamLocalBindUnlink=yes".to_string(),
-            "-L".to_string(),
-            format!("{}:127.0.0.1:7700", socket_path.display()),
-            format!("claude@{}", ip),
-        ]);
-
-        let tunnel = Command::new("ssh")
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to start SSH tunnel")?;
-
         let mut client = Self {
-            tunnel: Some(tunnel),
+            tunnel: None,
             socket_path,
+            server_ip: ip.clone(),
+            server_id,
         };
 
-        // Wait for tunnel to be ready (probe socket)
+        client.spawn_tunnel()?;
         client.wait_for_ready()?;
 
         Ok(client)
@@ -210,8 +160,73 @@ impl DaemonClient {
         // Clean up and re-establish tunnel
         self.cleanup_tunnel();
 
-        // Cannot easily reconnect without the original state.
-        bail!("SSH tunnel died and could not be re-established. Try running the command again.");
+        eprintln!("Reconnecting SSH tunnel to {}...", self.server_ip);
+        match self.spawn_tunnel() {
+            Ok(()) => {
+                self.wait_for_ready()?;
+                Ok(())
+            }
+            Err(e) => {
+                bail!("SSH tunnel died and reconnect failed: {}. Try running the command again.", e);
+            }
+        }
+    }
+
+    /// Spawn a new SSH tunnel process using stored connection params.
+    fn spawn_tunnel(&mut self) -> Result<()> {
+        let ip = &self.server_ip;
+        let socket_path = &self.socket_path;
+
+        let _ = std::fs::remove_file(socket_path);
+
+        let base_args = ssh_base_args(ip)?;
+        let mut args: Vec<String> = Vec::new();
+        let mut skip_next = false;
+        for (i, arg) in base_args.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "-o" {
+                if let Some(next) = base_args.get(i + 1) {
+                    if next.starts_with("ControlMaster=")
+                        || next.starts_with("ControlPath=")
+                        || next.starts_with("ControlPersist=")
+                    {
+                        skip_next = true;
+                        continue;
+                    }
+                }
+            }
+            args.push(arg.clone());
+        }
+        args.extend([
+            "-o".to_string(),
+            "ControlMaster=no".to_string(),
+            "-o".to_string(),
+            "ControlPath=none".to_string(),
+            "-o".to_string(),
+            "ControlPersist=no".to_string(),
+            "-N".to_string(),
+            "-o".to_string(),
+            "ExitOnForwardFailure=yes".to_string(),
+            "-o".to_string(),
+            "StreamLocalBindUnlink=yes".to_string(),
+            "-L".to_string(),
+            format!("{}:127.0.0.1:7700", socket_path.display()),
+            format!("claude@{}", ip),
+        ]);
+
+        let tunnel = Command::new("ssh")
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to start SSH tunnel")?;
+
+        self.tunnel = Some(tunnel);
+        Ok(())
     }
 
     fn cleanup_tunnel(&mut self) {
