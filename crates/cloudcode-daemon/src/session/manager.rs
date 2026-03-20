@@ -70,19 +70,19 @@ fn is_sendable_file(path: &PathBuf) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(
         ext.to_lowercase().as_str(),
-        "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "webp"
-            | "svg"
-            | "pdf"
-            | "md"
-            | "txt"
-            | "json"
-            | "csv"
-            | "html"
-            | "log"
+        // Images
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg"
+        // Documents
+        | "pdf" | "md" | "txt" | "json" | "csv" | "html" | "log"
+        // Code files
+        | "py" | "rs" | "js" | "ts" | "jsx" | "tsx"
+        | "rb" | "go" | "java" | "c" | "cpp" | "h"
+        | "sh" | "bash" | "zsh"
+        | "yaml" | "yml" | "toml" | "xml"
+        | "sql" | "graphql"
+        | "css" | "scss" | "less"
+        // Config
+        | "env" | "ini" | "cfg" | "conf"
     )
 }
 
@@ -821,8 +821,17 @@ mod tests {
         assert!(!is_sendable_file(&PathBuf::from("/tmp/lib.so")));
         assert!(!is_sendable_file(&PathBuf::from("/tmp/archive.tar.gz")));
         assert!(!is_sendable_file(&PathBuf::from("/tmp/binary")));
-        assert!(!is_sendable_file(&PathBuf::from("/tmp/script.rs")));
-        assert!(!is_sendable_file(&PathBuf::from("/tmp/code.py")));
+    }
+
+    #[test]
+    fn test_is_sendable_file_accepts_code_files() {
+        assert!(is_sendable_file(&PathBuf::from("/tmp/script.rs")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/code.py")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/app.js")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/main.go")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/style.css")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/config.yaml")));
+        assert!(is_sendable_file(&PathBuf::from("/tmp/setup.sh")));
     }
 
     #[test]
