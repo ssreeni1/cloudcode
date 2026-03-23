@@ -138,7 +138,8 @@ pub async fn run_poller(
     let mut stable_polls: HashMap<String, u8> = HashMap::new();
     // Track last sent question hash per session for dedup
     let mut last_sent_hash: HashMap<String, u64> = HashMap::new();
-    let mut activity_states: HashMap<String, ActivityState> = HashMap::new();
+    // Per-session: (tg_message_id, pane_snapshot_at_activity_start)
+    let mut activity_states: HashMap<String, (i64, String)> = HashMap::new();
     let mut completion_file_baselines: HashMap<String, HashMap<PathBuf, (SystemTime, u64)>> = HashMap::new();
     let mut last_completion_hash: HashMap<String, u64> = HashMap::new();
 
@@ -191,16 +192,15 @@ pub async fn run_poller(
                 if let Some(SessionQuestionState::WaitingForInput { question, .. }) =
                     states_lock.get(&session.name)
                 {
-                    let msg_id = activity_states.get(&session.name).map(|a| match a {
-                        ActivityState::Active { tg_message_id, .. } => *tg_message_id,
-                        ActivityState::Stabilizing { tg_message_id, .. } => *tg_message_id,
-                        _ => 0,
-                    }).unwrap_or(0);
+                    let msg_id = activity_states
+                        .get(&session.name)
+                        .map(|(id, _)| *id)
+                        .unwrap_or(0);
                     Some((question.clone(), msg_id))
                 } else {
                     None
                 }
-            }; // states_lock dropped here
+            };
             if let Some((question_text, msg_id)) = waiting_info {
                 if msg_id != 0 {
                     let escaped = question_text
@@ -214,7 +214,8 @@ pub async fn run_poller(
                         session.name
                     );
                     let _ = sender.edit_html(owner_id, msg_id, &msg).await;
-                    activity_states.insert(session.name.clone(), ActivityState::Idle);
+                    // Reset streaming state
+                    activity_states.insert(session.name.clone(), (0, String::new()));
                 }
                 continue;
             }
@@ -296,190 +297,146 @@ pub async fn run_poller(
                 }
             }
 
-            // --- Completion detection ---
-            // Track activity state transitions for CLI→TG notifications
-            let activity = activity_states
+            // --- Streaming + Completion detection ---
+            // Simple approach: track a per-session TG message ID.
+            // When content changes: send/edit "Working..." with latest output.
+            // When content stabilizes at idle prompt: edit to "Completed".
+
+            let stream_entry = activity_states
                 .entry(session.name.clone())
-                .or_insert(ActivityState::Idle);
+                .or_insert((0i64, String::new())); // (tg_message_id, pane_at_start)
 
             if !stabilized {
-                // Content is changing — session is active
-                match activity {
-                    ActivityState::Idle => {
-                        // Send initial "working" message to TG
-                        let msg_id = sender
-                            .send_html_returning_id(
-                                owner_id,
-                                &format!("⏳ <b>[{}]</b> Working...", session.name),
-                            )
-                            .await
-                            .unwrap_or(0);
-                        *activity = ActivityState::Active {
-                            since: Instant::now(),
-                            pane_snapshot: content.clone(),
-                            tg_message_id: msg_id,
+                // Content is changing
+                if stream_entry.0 == 0 {
+                    // First change — send "Working..." and save snapshot
+                    let msg_id = sender
+                        .send_html_returning_id(
+                            owner_id,
+                            &format!("⏳ <b>[{}]</b> Working...", session.name),
+                        )
+                        .await
+                        .unwrap_or(0);
+                    stream_entry.0 = msg_id;
+                    stream_entry.1 = prev_content
+                        .get(&session.name)
+                        .cloned()
+                        .unwrap_or_default();
+                } else {
+                    // Subsequent change — edit with latest diff
+                    let before_lines: Vec<&str> = stream_entry.1.lines().collect();
+                    let after_lines: Vec<&str> = content.lines().collect();
+                    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
+                        after_lines[before_lines.len()..]
+                            .iter()
+                            .copied()
+                            .filter(|l| {
+                                let t = l.trim();
+                                !t.is_empty()
+                                    && !t.starts_with("───")
+                                    && !t.starts_with("━━━")
+                                    && !t.contains("bypass permissions")
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+                    if !new_lines.is_empty() {
+                        let text = new_lines.join("\n");
+                        let truncated = if text.len() > 3500 {
+                            format!("{}...", &text[..3500])
+                        } else {
+                            text
                         };
-                    }
-                    ActivityState::Stabilizing { active_since, pane_snapshot, tg_message_id, .. } => {
-                        // Was stabilizing but content changed again — back to active
-                        *activity = ActivityState::Active {
-                            since: *active_since,
-                            pane_snapshot: pane_snapshot.clone(),
-                            tg_message_id: *tg_message_id,
-                        };
-                    }
-                    ActivityState::Active { tg_message_id, pane_snapshot, .. } => {
-                        // Stream update: edit the TG message with latest output
-                        if *tg_message_id != 0 {
-                            let before_lines: Vec<&str> = pane_snapshot.lines().collect();
-                            let after_lines: Vec<&str> = content.lines().collect();
-                            let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
-                                after_lines[before_lines.len()..]
-                                    .iter()
-                                    .copied()
-                                    .filter(|l| {
-                                        let t = l.trim();
-                                        !t.is_empty()
-                                            && !t.starts_with("───")
-                                            && !t.starts_with("━━━")
-                                            && !t.contains("bypass permissions")
-                                    })
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-                            if !new_lines.is_empty() {
-                                let text = new_lines.join("\n");
-                                let truncated = if text.len() > 3500 {
-                                    format!("{}...", &text[..3500])
-                                } else {
-                                    text
-                                };
-                                let escaped = truncated
-                                    .replace('&', "&amp;")
-                                    .replace('<', "&lt;")
-                                    .replace('>', "&gt;");
-                                let html = format!(
-                                    "⏳ <b>[{}]</b> Working...\n\n<pre>{}</pre>",
-                                    session.name, escaped
-                                );
-                                let _ = sender.edit_html(owner_id, *tg_message_id, &html).await;
-                            }
-                        }
+                        let escaped = truncated
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;");
+                        let html = format!(
+                            "⏳ <b>[{}]</b> Working...\n\n<pre>{}</pre>",
+                            session.name, escaped
+                        );
+                        let _ = sender.edit_html(owner_id, stream_entry.0, &html).await;
                     }
                 }
-            } else if stable_count >= 2 {
-                match activity.clone() {
-                    ActivityState::Active { since: active_since, pane_snapshot, tg_message_id } => {
-                        *activity = ActivityState::Stabilizing {
-                            since: Instant::now(),
-                            active_since,
-                            pane_snapshot: pane_snapshot.clone(),
-                            tg_message_id,
-                        };
-                    }
-                    ActivityState::Stabilizing { active_since, since: stab_since, pane_snapshot, tg_message_id } => {
-                        // Check if stable long enough AND was active long enough
-                        let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(3);
-                        let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
+            } else if stream_entry.0 != 0 && stable_count >= 2 {
+                // Content stabilized and we have an active streaming message.
+                // Check if we're at an idle prompt (completion).
+                let recent_lines: Vec<&str> = content
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .rev()
+                    .take(5)
+                    .collect();
 
-                        if was_active_long_enough && stable_long_enough {
-                            // Check for idle prompt (completion indicator).
-                            // Claude Code's UI has the prompt (❯) on a line
-                            // above the status bar, so check the last 5 lines.
-                            let recent_lines: Vec<&str> = content
-                                .lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .rev()
-                                .take(5)
-                                .collect();
+                let is_idle = recent_lines.iter().any(|line| {
+                    let t = line.trim();
+                    t == ">"
+                        || t == "❯"
+                        || t == "❯ "
+                        || t.ends_with("$ ")
+                        || t == "$"
+                        || t.contains("bypass permissions")
+                        || t.contains("shift+tab to cycle")
+                });
 
-                            let is_idle = recent_lines.iter().any(|line| {
-                                let t = line.trim();
-                                t == ">"
-                                    || t == "❯"
-                                    || t == "❯ "
-                                    || t.ends_with("$ ")
-                                    || t == "$"
-                                    || t.contains("bypass permissions")
-                                    || t.contains("shift+tab to cycle")
-                            });
+                let is_restart = content
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .any(|l| l.contains("[cloudcode]"));
 
-                            // Filter out restart banners
-                            let is_restart = content
-                                .lines()
-                                .rev()
-                                .take(5)
-                                .any(|l| l.contains("[cloudcode]"));
+                if is_idle && !is_restart {
+                    // Completion! Extract response and edit the message.
+                    let before_lines: Vec<&str> = stream_entry.1.lines().collect();
+                    let after_lines: Vec<&str> = content.lines().collect();
+                    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
+                        after_lines[before_lines.len()..]
+                            .iter()
+                            .copied()
+                            .filter(|l| {
+                                let t = l.trim();
+                                !t.is_empty()
+                                    && t != ">"
+                                    && t != "❯"
+                                    && t != "$"
+                                    && !t.contains("bypass permissions")
+                                    && !t.contains("shift+tab")
+                                    && !t.starts_with("───")
+                                    && !t.starts_with("━━━")
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
 
-                            if is_idle && !is_restart {
-                                // Completion detected! Dedup by content hash
-                                let completion_hash = content_hash(&content);
-                                if last_completion_hash.get(&session.name) != Some(&completion_hash) {
-                                    last_completion_hash.insert(session.name.clone(), completion_hash);
-
-                                    log::info!("Task completion detected in session '{}'", session.name);
-
-                                    // Extract the response by diffing the pane snapshot
-                                    // from when activity started vs now
-                                    let before_lines: Vec<&str> = pane_snapshot.lines().collect();
-                                    let after_lines: Vec<&str> = content.lines().collect();
-                                    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
-                                        after_lines[before_lines.len()..]
-                                            .iter()
-                                            .copied()
-                                            .filter(|l| {
-                                                let t = l.trim();
-                                                !t.is_empty()
-                                                    && t != ">"
-                                                    && t != "❯"
-                                                    && t != "$"
-                                                    && !t.contains("bypass permissions")
-                                                    && !t.contains("shift+tab")
-                                                    && !t.starts_with("───")
-                                                    && !t.starts_with("━━━")
-                                            })
-                                            .collect()
-                                    } else {
-                                        vec![]
-                                    };
-
-                                    let response_text = if new_lines.is_empty() {
-                                        "Use /peek to see output.".to_string()
-                                    } else {
-                                        // Truncate to ~3500 chars to fit in TG message
-                                        let joined = new_lines.join("\n");
-                                        if joined.len() > 3500 {
-                                            format!("{}...\n\n(truncated — use /peek for full output)", &joined[..3500])
-                                        } else {
-                                            joined
-                                        }
-                                    };
-
-                                    let escaped = response_text
-                                        .replace('&', "&amp;")
-                                        .replace('<', "&lt;")
-                                        .replace('>', "&gt;");
-                                    let msg = format!(
-                                        "✅ <b>[{}]</b> Task completed:\n\n<pre>{}</pre>",
-                                        session.name, escaped
-                                    );
-                                    // Edit the streaming message if we have one,
-                                    // otherwise send a new message
-                                    if tg_message_id != 0 {
-                                        let _ = sender.edit_html(owner_id, tg_message_id, &msg).await;
-                                    } else {
-                                        let _ = sender.send_html(owner_id, &msg).await;
-                                    }
-                                }
-                            }
-
-                            *activity = ActivityState::Idle;
+                    let response_text = if new_lines.is_empty() {
+                        "Use /peek to see output.".to_string()
+                    } else {
+                        let joined = new_lines.join("\n");
+                        if joined.len() > 3500 {
+                            format!(
+                                "{}...\n\n(truncated — use /peek for full output)",
+                                &joined[..3500]
+                            )
+                        } else {
+                            joined
                         }
-                    }
-                    ActivityState::Idle => {
-                        // Already idle, nothing to do
-                    }
+                    };
+
+                    let escaped = response_text
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    let msg = format!(
+                        "✅ <b>[{}]</b> Done:\n\n<pre>{}</pre>",
+                        session.name, escaped
+                    );
+                    let _ = sender.edit_html(owner_id, stream_entry.0, &msg).await;
+
+                    // Reset — ready for next task
+                    stream_entry.0 = 0;
+                    stream_entry.1.clear();
                 }
             }
         }
