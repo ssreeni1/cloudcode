@@ -395,29 +395,27 @@ pub async fn run_poller(
                 eprintln!("[poller:{}] is_idle={} is_restart={}", session.name, is_idle, is_restart);
                 if is_idle && !is_restart {
                     eprintln!("[poller:{}] COMPLETION DETECTED! editing msg_id={}", session.name, stream_entry.0);
-                    // Completion! Extract response and edit the message.
-                    let before_lines: Vec<&str> = stream_entry.1.lines().collect();
-                    let after_lines: Vec<&str> = content.lines().collect();
-                    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
-                        after_lines[before_lines.len()..]
-                            .iter()
-                            .copied()
-                            .filter(|l| {
-                                let t = l.trim();
-                                !t.is_empty()
-                                    && t != ">"
-                                    && t != "❯"
-                                    && t != "$"
-                                    && !t.contains("bypass permissions")
-                                    && !t.contains("shift+tab")
-                                    && !t.starts_with("───")
-                                    && !t.starts_with("━━━")
-                            })
-                            .collect()
-                    } else {
-                        vec![]
-                    };
+                    // Completion! Extract response by finding lines in
+                    // current pane that weren't in the snapshot.
+                    let before_set: std::collections::HashSet<&str> =
+                        stream_entry.1.lines().collect();
+                    let new_lines: Vec<&str> = content
+                        .lines()
+                        .filter(|l| !before_set.contains(l))
+                        .filter(|l| {
+                            let t = l.trim();
+                            !t.is_empty()
+                                && t != ">"
+                                && t != "❯"
+                                && t != "$"
+                                && !t.contains("bypass permissions")
+                                && !t.contains("shift+tab")
+                                && !t.starts_with("───")
+                                && !t.starts_with("━━━")
+                        })
+                        .collect();
 
+                    eprintln!("[poller:{}] new_lines count={}", session.name, new_lines.len());
                     let response_text = if new_lines.is_empty() {
                         "Use /peek to see output.".to_string()
                     } else {
