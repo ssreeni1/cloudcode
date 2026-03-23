@@ -298,18 +298,26 @@ pub async fn run_poller(
                         let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
 
                         if was_active_long_enough && stable_long_enough {
-                            // Check for idle prompt (completion indicator)
-                            let last_line = content
+                            // Check for idle prompt (completion indicator).
+                            // Claude Code's UI has the prompt (❯) on a line
+                            // above the status bar, so check the last 5 lines.
+                            let recent_lines: Vec<&str> = content
                                 .lines()
                                 .filter(|l| !l.trim().is_empty())
-                                .last()
-                                .unwrap_or("")
-                                .trim();
+                                .rev()
+                                .take(5)
+                                .collect();
 
-                            let is_idle = last_line == ">"
-                                || last_line == "❯"
-                                || last_line.ends_with("$ ")
-                                || last_line == "$";
+                            let is_idle = recent_lines.iter().any(|line| {
+                                let t = line.trim();
+                                t == ">"
+                                    || t == "❯"
+                                    || t == "❯ "
+                                    || t.ends_with("$ ")
+                                    || t == "$"
+                                    || t.contains("bypass permissions")
+                                    || t.contains("shift+tab to cycle")
+                            });
 
                             // Filter out restart banners
                             let is_restart = content
