@@ -377,13 +377,20 @@ pub async fn run_poller(
 
                 let is_idle = recent_lines.iter().any(|line| {
                     let t = line.trim();
+                    // Claude Code idle indicators
                     t == ">"
                         || t == "❯"
                         || t == "❯ "
-                        || t.ends_with("$ ")
-                        || t == "$"
                         || t.contains("bypass permissions")
                         || t.contains("shift+tab to cycle")
+                        // Codex idle indicators
+                        || t == "›"
+                        || t.starts_with("› ")
+                        || t.contains("% left ·")
+                        || t.contains("gpt-5.4")
+                        // Shell prompt
+                        || t.ends_with("$ ")
+                        || t == "$"
                 });
 
                 let is_restart = content
@@ -420,6 +427,11 @@ pub async fn run_poller(
                                 && !t.contains("Voice mode")
                                 && !t.contains("cloudcode/sessions/")
                                 && !t.contains("medium · /effort")
+                                // Codex UI chrome
+                                && t != "›"
+                                && !t.starts_with("› ")
+                                && !t.contains("% left ·")
+                                && !t.contains("gpt-5.4")
                         })
                         .collect();
 
