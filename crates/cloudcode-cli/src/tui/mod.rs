@@ -55,8 +55,6 @@ pub async fn run_tui(force_wizard: bool) -> Result<()> {
             LoopAction::Quit => break,
             LoopAction::SuspendForCommand(cmd) => {
                 execute_interactive(cmd).await;
-                println!("\nPress Enter/Return to return to cloudcode...");
-                let _ = io::stdin().read_line(&mut String::new());
             }
         }
     }
