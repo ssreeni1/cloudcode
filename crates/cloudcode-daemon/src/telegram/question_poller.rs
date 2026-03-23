@@ -184,14 +184,39 @@ pub async fn run_poller(
         last_completion_hash.retain(|k, _| active_names.contains(k));
 
         for session in &sessions {
-            // Skip sessions already in WaitingForInput
-            {
+            // Skip sessions already in WaitingForInput — but first,
+            // update the streaming message if there is one
+            let waiting_info: Option<(String, i64)> = {
                 let states_lock = states.lock().unwrap();
-                if let Some(SessionQuestionState::WaitingForInput { .. }) =
+                if let Some(SessionQuestionState::WaitingForInput { question, .. }) =
                     states_lock.get(&session.name)
                 {
-                    continue;
+                    let msg_id = activity_states.get(&session.name).map(|a| match a {
+                        ActivityState::Active { tg_message_id, .. } => *tg_message_id,
+                        ActivityState::Stabilizing { tg_message_id, .. } => *tg_message_id,
+                        _ => 0,
+                    }).unwrap_or(0);
+                    Some((question.clone(), msg_id))
+                } else {
+                    None
                 }
+            }; // states_lock dropped here
+            if let Some((question_text, msg_id)) = waiting_info {
+                if msg_id != 0 {
+                    let escaped = question_text
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    let msg = format!(
+                        "❓ <b>[{}]</b> Waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt;",
+                        session.name,
+                        if escaped.len() > 3500 { &escaped[..3500] } else { &escaped },
+                        session.name
+                    );
+                    let _ = sender.edit_html(owner_id, msg_id, &msg).await;
+                    activity_states.insert(session.name.clone(), ActivityState::Idle);
+                }
+                continue;
             }
 
             // Skip sessions with active send_via_tmux (prevents double-notification)
