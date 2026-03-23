@@ -299,7 +299,7 @@ pub async fn run_poller(
                     }
                     ActivityState::Stabilizing { active_since, since: stab_since, pane_snapshot } => {
                         // Check if stable long enough AND was active long enough
-                        let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(10);
+                        let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(3);
                         let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
 
                         if was_active_long_enough && stable_long_enough {
