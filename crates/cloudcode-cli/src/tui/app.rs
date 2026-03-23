@@ -834,6 +834,12 @@ impl App {
                 });
             }
             LogEvent::Done(code) => {
+                let failed = code.is_some_and(|c| c != 0);
+                let was_up = self
+                    .running_command
+                    .as_deref()
+                    .is_some_and(|c| c == "/up");
+
                 self.command_done = true;
                 if let Some(code) = code {
                     if code != 0 {
@@ -846,6 +852,16 @@ impl App {
                 // Reload VPS state in case /up or /down changed it
                 if let Ok(state) = VpsState::load() {
                     self.vps_state = state;
+                }
+
+                // If /up failed (e.g. server unavailable), offer to retry
+                // by re-showing the server type picker
+                if failed && was_up && !self.vps_state.is_provisioned() {
+                    self.log_lines.push(LogLine {
+                        text: "Tip: Press Enter, then type /up to try a different server type."
+                            .to_string(),
+                        is_error: false,
+                    });
                 }
             }
         }
