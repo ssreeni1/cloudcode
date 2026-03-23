@@ -306,6 +306,12 @@ pub async fn run_poller(
                 .entry(session.name.clone())
                 .or_insert((0i64, String::new())); // (tg_message_id, pane_at_start)
 
+            eprintln!(
+                "[poller:{}] stabilized={} stable_count={} msg_id={} has_prev={}",
+                session.name, stabilized, stable_count, stream_entry.0,
+                prev_content.contains_key(&session.name)
+            );
+
             if !stabilized {
                 // Content is changing — definitely not idle
                 if stream_entry.0 == 0 && prev_content.contains_key(&session.name) {
@@ -361,7 +367,7 @@ pub async fn run_poller(
                 }
             } else if stream_entry.0 != 0 && stable_count >= 2 {
                 // Content stabilized and we have an active streaming message.
-                // Check if we're at an idle prompt (completion).
+                eprintln!("[poller:{}] CHECKING COMPLETION (stable_count={})", session.name, stable_count);
                 let recent_lines: Vec<&str> = content
                     .lines()
                     .filter(|l| !l.trim().is_empty())
@@ -386,7 +392,9 @@ pub async fn run_poller(
                     .take(5)
                     .any(|l| l.contains("[cloudcode]"));
 
+                eprintln!("[poller:{}] is_idle={} is_restart={}", session.name, is_idle, is_restart);
                 if is_idle && !is_restart {
+                    eprintln!("[poller:{}] COMPLETION DETECTED! editing msg_id={}", session.name, stream_entry.0);
                     // Completion! Extract response and edit the message.
                     let before_lines: Vec<&str> = stream_entry.1.lines().collect();
                     let after_lines: Vec<&str> = content.lines().collect();
