@@ -404,61 +404,56 @@ pub async fn run_poller(
                     .take(5)
                     .any(|l| l.contains("[cloudcode]"));
 
-                eprintln!("[poller:{}] is_idle={} is_restart={}", session.name, is_idle, is_restart);
                 if is_idle && !is_restart {
-                    eprintln!("[poller:{}] COMPLETION DETECTED! editing msg_id={}", session.name, stream_entry.0);
-                    // Extract the meaningful content from the pane.
-                    // Take all lines, filter UI chrome, grab the last
-                    // meaningful chunk (the response).
-                    let meaningful: Vec<&str> = content
-                        .lines()
+                    // Extract the AI's response lines from the pane.
+                    // AI output lines start with • (Claude) or • (Codex).
+                    // Also grab lines that are continuations (indented).
+                    let all_lines: Vec<&str> = content.lines().collect();
+
+                    // Find the last user prompt (lines starting with ❯ or ›)
+                    let prompt_idx = all_lines
+                        .iter()
+                        .rposition(|l| {
+                            let t = l.trim();
+                            (t.starts_with("❯ ") || t.starts_with("› "))
+                                && t.len() > 2
+                                // Skip suggestion lines (grayed out prompts)
+                                && !t.contains("Summarize")
+                                && !t.contains("Improve")
+                                && !t.contains("documentation")
+                        })
+                        .unwrap_or(0);
+
+                    // Get lines after the prompt, filter UI chrome
+                    let response_lines: Vec<&str> = all_lines[prompt_idx..]
+                        .iter()
+                        .copied()
                         .filter(|l| {
                             let t = l.trim();
                             !t.is_empty()
+                                // Keep AI output (• bullets, indented text, code)
+                                // Filter UI chrome
                                 && t != ">"
                                 && t != "❯"
-                                && t != "❯ "
-                                && t != "$"
-                                && !t.contains("bypass permissions")
-                                && !t.contains("shift+tab to cycle")
-                                && !t.starts_with("───")
-                                && !t.starts_with("━━━")
-                                && !t.starts_with("▐▛")
-                                && !t.starts_with("▝▜")
-                                && !t.starts_with("▘▘")
-                                && !t.contains("Claude Code v")
-                                && !t.contains("Opus 4")
-                                && !t.contains("Claude Max")
-                                && !t.contains("Voice mode")
-                                && !t.contains("cloudcode/sessions/")
-                                && !t.contains("medium · /effort")
-                                // Codex UI chrome
                                 && t != "›"
                                 && !t.starts_with("› ")
+                                && !t.contains("bypass permissions")
+                                && !t.contains("shift+tab to cycle")
                                 && !t.contains("% left ·")
                                 && !t.contains("gpt-5.4")
+                                && !t.starts_with("───")
+                                && !t.starts_with("━━━")
+                                && !t.contains("cloudcode/sessions/")
                         })
                         .collect();
 
-                    // Take up to the last 30 meaningful lines as the response
-                    let response_lines: Vec<&str> = meaningful
-                        .iter()
-                        .rev()
-                        .take(30)
-                        .copied()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect();
-
-                    eprintln!("[poller:{}] meaningful lines={}", session.name, response_lines.len());
                     let response_text = if response_lines.is_empty() {
                         "Use /peek to see output.".to_string()
                     } else {
                         let joined = response_lines.join("\n");
                         if joined.len() > 3500 {
                             format!(
-                                "{}...\n\n(truncated — use /peek for full output)",
+                                "{}...\n\n/peek for full output",
                                 &joined[..3500]
                             )
                         } else {
@@ -471,7 +466,7 @@ pub async fn run_poller(
                         .replace('<', "&lt;")
                         .replace('>', "&gt;");
                     let msg = format!(
-                        "✅ <b>[{}]</b> Done:\n\n<pre>{}</pre>",
+                        "✅ <b>[{}]</b> Done:\n\n{}",
                         session.name, escaped
                     );
                     let _ = sender.edit_html(owner_id, stream_entry.0, &msg).await;
