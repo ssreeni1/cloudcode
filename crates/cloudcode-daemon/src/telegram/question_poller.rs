@@ -410,8 +410,9 @@ pub async fn run_poller(
                     // Also grab lines that are continuations (indented).
                     let all_lines: Vec<&str> = content.lines().collect();
 
-                    // Find the last user prompt (lines starting with ❯ or ›)
-                    let prompt_idx = all_lines
+                    // Find the last real user prompt (❯ or ›),
+                    // skipping Codex suggestion lines.
+                    let response_start = all_lines
                         .iter()
                         .rposition(|l| {
                             let t = l.trim();
@@ -421,11 +422,16 @@ pub async fn run_poller(
                                 && !t.contains("Summarize")
                                 && !t.contains("Improve")
                                 && !t.contains("documentation")
+                                && !t.contains("Write tests")
+                                && !t.contains("Write unit")
+                                && !t.contains("@filename")
+                                && !t.contains("recent commits")
                         })
+                        .map(|idx| idx + 1) // start AFTER the prompt line
                         .unwrap_or(0);
 
                     // Get lines after the prompt, filter UI chrome
-                    let response_lines: Vec<&str> = all_lines[prompt_idx..]
+                    let response_lines: Vec<&str> = all_lines[response_start..]
                         .iter()
                         .copied()
                         .filter(|l| {
