@@ -469,6 +469,20 @@ impl SessionManager {
             bail!("tmux new-session failed with status {}", status);
         }
 
+        // Set a persistent status-right hint for this session so users
+        // know how to detach. Per-session option, does not affect other
+        // tmux sessions. Failure is non-fatal (cosmetic only).
+        let _ = Command::new("tmux")
+            .args([
+                "set-option",
+                "-t",
+                &name,
+                "status-right",
+                " Detach: Ctrl-b d ",
+            ])
+            .status()
+            .await;
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

@@ -26,7 +26,7 @@ fn attach_ssh_args(ip: &str, session: &str) -> Vec<String> {
         "ControlPath=none".to_string(),
         "-t".to_string(), // force PTY allocation
         format!("claude@{}", ip),
-        format!("tmux attach-session -t {}", quoted_session),
+        format!("tmux display-message -t {} -d 5000 'Detach: Ctrl-b then d'; tmux attach-session -t {}", quoted_session, quoted_session),
     ]
 }
 
@@ -75,7 +75,15 @@ pub async fn run(session: String) -> Result<()> {
     );
     println!(
         "{}",
-        "  (Detach with Ctrl-b d, or close terminal to disconnect)".dimmed()
+        "  To return to cloudcode: press Ctrl-b, then d (two separate keypresses)".dimmed()
+    );
+    println!(
+        "{}",
+        "  Session stays alive in the background after detaching.".dimmed()
+    );
+    println!(
+        "{}",
+        "  Alternative: press Enter, then ~, then . to disconnect SSH (session survives)".dimmed()
     );
 
     let mut args = ssh_base_args(ip)?;
@@ -190,8 +198,8 @@ mod tests {
         let args = attach_ssh_args("1.2.3.4", "my-session");
         let last = args.last().unwrap();
         assert!(
-            last.starts_with("tmux attach-session -t "),
-            "Last arg should be the tmux attach command, got: {}",
+            last.contains("tmux attach-session -t "),
+            "Last arg should contain the tmux attach command, got: {}",
             last
         );
         assert!(
@@ -205,7 +213,28 @@ mod tests {
         // Session name should be shell-quoted in the tmux command
         let args = attach_ssh_args("1.2.3.4", "sess-123");
         let tmux_cmd = args.last().unwrap();
-        assert_eq!(tmux_cmd, "tmux attach-session -t 'sess-123'");
+        assert!(
+            tmux_cmd.contains("attach-session -t 'sess-123'"),
+            "tmux command should contain attach-session with quoted session name, got: {}",
+            tmux_cmd
+        );
+    }
+
+    #[test]
+    fn attach_ssh_args_includes_display_message_before_attach() {
+        let args = attach_ssh_args("1.2.3.4", "my-session");
+        let last = args.last().unwrap();
+        assert!(
+            last.contains("display-message") && last.contains("attach-session"),
+            "Remote command should chain display-message and attach-session, got: {}",
+            last
+        );
+        // Uses ; not && so attach runs even if display-message fails
+        assert!(
+            last.contains("; tmux attach"),
+            "Commands should be chained with ; not &&, got: {}",
+            last
+        );
     }
 
     #[test]
