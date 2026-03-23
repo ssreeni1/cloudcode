@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
     // Create shared question states for automatic question forwarding
     let question_states = question_poller::new_question_states();
 
+    // Create shared sending flags for poller/send_via_tmux coordination
+    let sending_flags = question_poller::new_sending_flags();
+
     // Load default session store
     let default_session = match DefaultSessionStore::load() {
         Ok(store) => Arc::new(store),
@@ -153,6 +156,7 @@ async fn main() -> Result<()> {
                 let poller_sender = Arc::clone(&sender);
                 let poller_owner_id = tg_config.owner_id;
                 let poller_states = question_states.clone();
+                let poller_flags = sending_flags.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     question_poller::run_poller(
@@ -160,6 +164,7 @@ async fn main() -> Result<()> {
                         poller_sender,
                         poller_owner_id,
                         poller_states,
+                        poller_flags,
                     )
                     .await;
                 });
@@ -188,6 +193,7 @@ async fn main() -> Result<()> {
                 let poller_mgr = Arc::clone(&session_mgr);
                 let poller_owner_id = tg.owner_id;
                 let poller_states = question_states.clone();
+                let poller_flags = sending_flags.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     question_poller::run_poller(
@@ -195,6 +201,7 @@ async fn main() -> Result<()> {
                         poller_sender,
                         poller_owner_id,
                         poller_states,
+                        poller_flags,
                     )
                     .await;
                 });

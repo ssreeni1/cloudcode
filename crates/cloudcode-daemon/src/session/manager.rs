@@ -271,6 +271,79 @@ fn session_snapshot_dirs_from_workdir(workdir: &Path, session_tmp: Option<&Path>
     dirs
 }
 
+/// Check if a Codex tmux session is ready for input.
+/// Returns false if the session is in an auth flow or restarting.
+fn is_codex_ready(pane_content: &str) -> bool {
+    let lines: Vec<&str> = pane_content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return false;
+    }
+
+    // Check for auth/restart indicators
+    let content = pane_content.to_lowercase();
+    if content.contains("device code")
+        || content.contains("authorize")
+        || content.contains("[cloudcode]")
+        || content.contains("restarting in")
+        || content.contains("codex login")
+    {
+        // Check if these are in the last 10 lines (might be old scrollback)
+        let recent: String = lines.iter().rev().take(10).copied().collect::<Vec<_>>().join("\n").to_lowercase();
+        if recent.contains("device code")
+            || recent.contains("authorize")
+            || recent.contains("[cloudcode]")
+            || recent.contains("restarting in")
+            || recent.contains("codex login")
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Extract the AI's response by diffing pane content before and after a send.
+/// Strips the echoed input line and prompt lines.
+fn extract_response(pane_before: &str, pane_after: &str) -> String {
+    let before_lines: Vec<&str> = pane_before.lines().collect();
+    let after_lines: Vec<&str> = pane_after.lines().collect();
+
+    // Find new lines that weren't in the before snapshot
+    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
+        after_lines[before_lines.len()..].to_vec()
+    } else {
+        // Pane may have scrolled — find the divergence point
+        let mut start = 0;
+        for (i, line) in after_lines.iter().enumerate() {
+            if i < before_lines.len() && *line == before_lines[i] {
+                start = i + 1;
+            } else {
+                break;
+            }
+        }
+        after_lines[start..].to_vec()
+    };
+
+    // Filter out prompt lines and empty trailing lines
+    let response: Vec<&str> = new_lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            let trimmed = l.trim();
+            !trimmed.is_empty()
+                && trimmed != ">"
+                && trimmed != "❯"
+                && !trimmed.ends_with("$ ")
+                && trimmed != "$"
+        })
+        .collect();
+
+    response.join("\n").trim().to_string()
+}
+
 pub struct SessionManager {
     send_locks: std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>,
     default_provider: RwLock<AiProvider>,
@@ -478,6 +551,18 @@ impl SessionManager {
                 "-n",  // no prefix needed
                 "C-y",
                 "detach-client",
+            ])
+            .status()
+            .await;
+
+        // Increase tmux scrollback for better output capture
+        let _ = Command::new("tmux")
+            .args([
+                "set-option",
+                "-t",
+                &name,
+                "history-limit",
+                "10000",
             ])
             .status()
             .await;
@@ -726,7 +811,7 @@ impl SessionManager {
         }
 
         let output = Command::new("tmux")
-            .args(["capture-pane", "-p", "-S", "-50", "-t", session])
+            .args(["capture-pane", "-p", "-S", "-500", "-t", session])
             .output()
             .await
             .context("Failed to capture tmux pane")?;
@@ -739,6 +824,157 @@ impl SessionManager {
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
         let clean = strip_ansi_codes(&raw);
         Ok(clean)
+    }
+
+    /// Capture full tmux pane scrollback (last 500 lines, vs 50 for peek).
+    /// Used by send_via_tmux for response extraction.
+    pub async fn capture_pane_full(&self, session: &str) -> Result<String> {
+        validate_session_name(session)?;
+        if !self.session_exists(session).await {
+            bail!("Session '{}' does not exist", session);
+        }
+
+        let output = Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-500", "-t", session])
+            .output()
+            .await
+            .context("Failed to capture tmux pane")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux capture-pane failed: {}", stderr);
+        }
+
+        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        let clean = strip_ansi_codes(&raw);
+        Ok(clean)
+    }
+
+    /// Wait for tmux output to stabilize after sending input.
+    /// Polls capture_pane_full every 2 seconds. Returns the new output
+    /// (diff between pane_before and current pane) when stable.
+    /// Also detects if Claude/Codex is asking a question.
+    async fn wait_for_output(&self, session: &str, pane_before: &str) -> Result<String> {
+        use crate::telegram::question_poller::detect_question;
+
+        let mut prev_pane = String::new();
+        let mut stable_count: u8 = 0;
+        let start = std::time::Instant::now();
+        let timeout_duration = Duration::from_secs(300); // 5 minutes
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            if start.elapsed() > timeout_duration {
+                // Timeout — return whatever we have
+                let current = self.capture_pane_full(session).await.unwrap_or_default();
+                return Ok(extract_response(pane_before, &current));
+            }
+
+            let current = self.capture_pane_full(session).await?;
+
+            if current == prev_pane && !current.is_empty() {
+                stable_count += 1;
+                if stable_count >= 2 {
+                    // Output stabilized — check if it's a question
+                    if detect_question(&current).is_some() {
+                        // It's a question, not a completion — return what we have
+                        // The caller (dispatch) will handle WaitingForInput
+                        return Ok(extract_response(pane_before, &current));
+                    }
+                    return Ok(extract_response(pane_before, &current));
+                }
+            } else {
+                stable_count = 0;
+            }
+
+            prev_pane = current;
+        }
+    }
+
+    /// Send a message through the tmux session (for Codex only).
+    /// Types the message into tmux, waits for output to stabilize,
+    /// captures the response and detects new files.
+    pub async fn send_via_tmux(&self, session: &str, message: &str) -> Result<SendOutput> {
+        validate_session_name(session)?;
+        if !self.session_exists(session).await {
+            bail!("Session '{}' does not exist", session);
+        }
+
+        // Acquire per-session lock
+        let lock = {
+            let mut locks = self.send_locks.lock().unwrap();
+            locks
+                .entry(session.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+
+        // Check Codex readiness
+        let pane = self.capture_pane_full(session).await?;
+        if !is_codex_ready(&pane) {
+            bail!(
+                "Session '{}' is not ready for input (may be authenticating or restarting)",
+                session
+            );
+        }
+
+        let workdir = session_runtime_workdir(session).await?;
+        let session_tmp = daemon_home_dir()
+            .join(".cloudcode")
+            .join("sessions")
+            .join(session)
+            .join("tmp");
+        std::fs::create_dir_all(&session_tmp).ok();
+
+        // Snapshot files before
+        let watch_dirs = session_snapshot_dirs_from_workdir(&workdir, Some(&session_tmp));
+        let files_before = snapshot_files(&watch_dirs);
+
+        // Capture pane before sending
+        let pane_before = self.capture_pane_full(session).await?;
+
+        log::info!("Session '{}': sending via tmux: {}", session, &message[..message.len().min(80)]);
+
+        // Type the message into tmux
+        self.send_keys(session, message).await?;
+
+        // Wait for output to stabilize
+        let response = self.wait_for_output(session, &pane_before).await?;
+
+        // Snapshot files after
+        let files_after = snapshot_files(&watch_dirs);
+        let mut new_files: Vec<PathBuf> = files_after
+            .into_iter()
+            .filter(|(path, (mtime, size))| {
+                match files_before.get(path) {
+                    None => true,
+                    Some((old_mtime, old_size)) => mtime != old_mtime || size != old_size,
+                }
+            })
+            .map(|(path, _)| path)
+            .filter(|f| is_sendable_file(f))
+            .collect();
+
+        // If no new files, check response for file references
+        if new_files.is_empty() {
+            new_files = extract_referenced_files(&response, &workdir);
+        }
+
+        if !new_files.is_empty() {
+            log::info!(
+                "Session '{}': detected {} file(s) via tmux send: {:?}",
+                session,
+                new_files.len(),
+                new_files
+            );
+        }
+
+        Ok(SendOutput {
+            text: response,
+            files: new_files,
+        })
     }
 
     /// Send keystrokes to a tmux session (literal text + Enter).
@@ -1063,5 +1299,60 @@ mod tests {
     #[test]
     fn strip_ansi_codes_only_codes_no_text() {
         assert_eq!(strip_ansi_codes("\x1b[31m\x1b[0m\x1b[2J"), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // is_codex_ready tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_codex_ready_idle_prompt() {
+        let pane = "Some output\nMore output\n> ";
+        assert!(is_codex_ready(pane));
+    }
+
+    #[test]
+    fn test_is_codex_ready_auth_flow() {
+        let pane = "Starting Codex...\nPlease authorize via device code\nhttps://openai.com/device";
+        assert!(!is_codex_ready(pane));
+    }
+
+    #[test]
+    fn test_is_codex_ready_restarting() {
+        let pane = "Error occurred\n[cloudcode] Codex exited. Restarting in 3s...";
+        assert!(!is_codex_ready(pane));
+    }
+
+    #[test]
+    fn test_is_codex_ready_empty() {
+        assert!(!is_codex_ready(""));
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_response tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_response_simple() {
+        let before = "line1\nline2\n> ";
+        let after = "line1\nline2\n> hello\nSure, here is the code:\nfn main() {}\n> ";
+        let response = extract_response(before, after);
+        assert!(response.contains("Sure, here is the code:"));
+        assert!(response.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn test_extract_response_empty_diff() {
+        let pane = "line1\nline2\n> ";
+        let response = extract_response(pane, pane);
+        assert!(response.is_empty());
+    }
+
+    #[test]
+    fn test_extract_response_strips_prompts() {
+        let before = "old output\n";
+        let after = "old output\nnew response here\n> ";
+        let response = extract_response(before, after);
+        assert_eq!(response, "new response here");
     }
 }

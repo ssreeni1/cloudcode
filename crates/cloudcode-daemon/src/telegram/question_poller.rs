@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use super::sender::TelegramSender;
 use crate::session::manager::SessionManager;
@@ -30,6 +31,21 @@ pub enum SessionQuestionState {
 pub type QuestionStates = Arc<std::sync::Mutex<HashMap<String, SessionQuestionState>>>;
 
 pub fn new_question_states() -> QuestionStates {
+    Arc::new(std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Per-session activity state for completion detection
+#[derive(Clone, Debug)]
+pub enum ActivityState {
+    Idle,
+    Active { since: Instant },
+    Stabilizing { since: Instant, active_since: Instant },
+}
+
+/// Shared flag to coordinate with send_via_tmux
+pub type SendingFlags = Arc<std::sync::Mutex<HashMap<String, bool>>>;
+
+pub fn new_sending_flags() -> SendingFlags {
     Arc::new(std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -103,6 +119,7 @@ pub async fn run_poller(
     sender: Arc<dyn TelegramSender>,
     owner_id: i64,
     states: QuestionStates,
+    sending_flags: SendingFlags,
 ) {
     log::info!("Question poller started");
 
@@ -111,6 +128,9 @@ pub async fn run_poller(
     let mut stable_polls: HashMap<String, u8> = HashMap::new();
     // Track last sent question hash per session for dedup
     let mut last_sent_hash: HashMap<String, u64> = HashMap::new();
+    let mut activity_states: HashMap<String, ActivityState> = HashMap::new();
+    let mut completion_file_baselines: HashMap<String, HashMap<PathBuf, (SystemTime, u64)>> = HashMap::new();
+    let mut last_completion_hash: HashMap<String, u64> = HashMap::new();
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3));
 
@@ -149,6 +169,9 @@ pub async fn run_poller(
         prev_content.retain(|k, _| active_names.contains(k));
         stable_polls.retain(|k, _| active_names.contains(k));
         last_sent_hash.retain(|k, _| active_names.contains(k));
+        activity_states.retain(|k, _| active_names.contains(k));
+        completion_file_baselines.retain(|k, _| active_names.contains(k));
+        last_completion_hash.retain(|k, _| active_names.contains(k));
 
         for session in &sessions {
             // Skip sessions already in WaitingForInput
@@ -157,6 +180,14 @@ pub async fn run_poller(
                 if let Some(SessionQuestionState::WaitingForInput { .. }) =
                     states_lock.get(&session.name)
                 {
+                    continue;
+                }
+            }
+
+            // Skip sessions with active send_via_tmux (prevents double-notification)
+            {
+                let flags = sending_flags.lock().unwrap();
+                if flags.get(&session.name).copied().unwrap_or(false) {
                     continue;
                 }
             }
@@ -180,58 +211,136 @@ pub async fn run_poller(
             };
             prev_content.insert(session.name.clone(), content.clone());
 
-            if !stabilized || stable_count < 2 {
-                continue;
+            if stabilized && stable_count >= 2 {
+                // Check for question pattern
+                if let Some(detection) = detect_question(&content) {
+                    let hash = content_hash(&detection.question);
+
+                    // Check if we already sent this exact question
+                    if last_sent_hash.get(&session.name) != Some(&hash) {
+                        // New question detected!
+                        log::info!("Question detected in session '{}'", session.name);
+                        last_sent_hash.insert(session.name.clone(), hash);
+
+                        // Update state to WaitingForInput
+                        {
+                            let mut states_lock = states.lock().unwrap();
+                            states_lock.insert(
+                                session.name.clone(),
+                                SessionQuestionState::WaitingForInput {
+                                    question: detection.question.clone(),
+                                    detected_at: Instant::now(),
+                                },
+                            );
+                        }
+
+                        // Send to Telegram with HTML formatting.
+                        // Truncate the question to ensure the final message fits
+                        // in a single 4096-char Telegram message (avoids splitting
+                        // mid-HTML-tag when chunking).
+                        let escaped_question = detection
+                            .question
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;");
+                        // Reserve ~200 chars for the wrapper HTML + session names
+                        let max_question_len = 3800;
+                        let truncated = if escaped_question.len() > max_question_len {
+                            format!("{}…", &escaped_question[..max_question_len])
+                        } else {
+                            escaped_question
+                        };
+                        let msg = format!(
+                            "\u{1f514} <b>[{}]</b> Claude is waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt; or /type {} &lt;text&gt;",
+                            session.name, truncated, session.name, session.name
+                        );
+                        // Message is guaranteed to fit in one chunk, but send_html
+                        // handles chunking safely for plain text fallback
+                        let _ = sender.send_html(owner_id, &msg).await;
+                    }
+                }
             }
 
-            // Check for question pattern
-            if let Some(detection) = detect_question(&content) {
-                let hash = content_hash(&detection.question);
+            // --- Completion detection ---
+            // Track activity state transitions for CLI→TG notifications
+            let activity = activity_states
+                .entry(session.name.clone())
+                .or_insert(ActivityState::Idle);
 
-                // Check if we already sent this exact question
-                if last_sent_hash.get(&session.name) == Some(&hash) {
-                    continue;
+            if !stabilized {
+                // Content is changing — session is active
+                match activity {
+                    ActivityState::Idle => {
+                        *activity = ActivityState::Active { since: Instant::now() };
+                        // Take file baseline when entering active state
+                        // (for detecting new files on completion)
+                    }
+                    ActivityState::Stabilizing { active_since, .. } => {
+                        // Was stabilizing but content changed again — back to active
+                        *activity = ActivityState::Active { since: *active_since };
+                    }
+                    ActivityState::Active { .. } => {
+                        // Already active, keep going
+                    }
                 }
+            } else if stable_count >= 2 {
+                match activity.clone() {
+                    ActivityState::Active { since: active_since } => {
+                        // Just stabilized after being active
+                        *activity = ActivityState::Stabilizing {
+                            since: Instant::now(),
+                            active_since,
+                        };
+                    }
+                    ActivityState::Stabilizing { active_since, since: stab_since } => {
+                        // Check if stable long enough AND was active long enough
+                        let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(10);
+                        let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
 
-                // New question detected!
-                log::info!("Question detected in session '{}'", session.name);
-                last_sent_hash.insert(session.name.clone(), hash);
+                        if was_active_long_enough && stable_long_enough {
+                            // Check for idle prompt (completion indicator)
+                            let last_line = content
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .last()
+                                .unwrap_or("")
+                                .trim();
 
-                // Update state to WaitingForInput
-                {
-                    let mut states_lock = states.lock().unwrap();
-                    states_lock.insert(
-                        session.name.clone(),
-                        SessionQuestionState::WaitingForInput {
-                            question: detection.question.clone(),
-                            detected_at: Instant::now(),
-                        },
-                    );
+                            let is_idle = last_line == ">"
+                                || last_line == "❯"
+                                || last_line.ends_with("$ ")
+                                || last_line == "$";
+
+                            // Filter out restart banners
+                            let is_restart = content
+                                .lines()
+                                .rev()
+                                .take(5)
+                                .any(|l| l.contains("[cloudcode]"));
+
+                            if is_idle && !is_restart {
+                                // Completion detected! Dedup by content hash
+                                let completion_hash = content_hash(&content);
+                                if last_completion_hash.get(&session.name) != Some(&completion_hash) {
+                                    last_completion_hash.insert(session.name.clone(), completion_hash);
+
+                                    log::info!("Task completion detected in session '{}'", session.name);
+
+                                    let msg = format!(
+                                        "✅ <b>[{}]</b> Task completed. Use /peek to see output.",
+                                        session.name
+                                    );
+                                    let _ = sender.send_html(owner_id, &msg).await;
+                                }
+                            }
+
+                            *activity = ActivityState::Idle;
+                        }
+                    }
+                    ActivityState::Idle => {
+                        // Already idle, nothing to do
+                    }
                 }
-
-                // Send to Telegram with HTML formatting.
-                // Truncate the question to ensure the final message fits
-                // in a single 4096-char Telegram message (avoids splitting
-                // mid-HTML-tag when chunking).
-                let escaped_question = detection
-                    .question
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                // Reserve ~200 chars for the wrapper HTML + session names
-                let max_question_len = 3800;
-                let truncated = if escaped_question.len() > max_question_len {
-                    format!("{}…", &escaped_question[..max_question_len])
-                } else {
-                    escaped_question
-                };
-                let msg = format!(
-                    "\u{1f514} <b>[{}]</b> Claude is waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt; or /type {} &lt;text&gt;",
-                    session.name, truncated, session.name, session.name
-                );
-                // Message is guaranteed to fit in one chunk, but send_html
-                // handles chunking safely for plain text fallback
-                let _ = sender.send_html(owner_id, &msg).await;
             }
         }
     }
@@ -435,5 +544,19 @@ mod tests {
     fn test_detect_question_do_you_want_me_to() {
         let content = "I found a bug in the auth module.\nDo you want me to fix it?";
         assert!(detect_question(content).is_some());
+    }
+
+    #[test]
+    fn test_activity_state_transitions() {
+        // Just verify the enum can be constructed and cloned
+        let idle = ActivityState::Idle;
+        let active = ActivityState::Active { since: Instant::now() };
+        let stabilizing = ActivityState::Stabilizing {
+            since: Instant::now(),
+            active_since: Instant::now(),
+        };
+        let _ = idle.clone();
+        let _ = active.clone();
+        let _ = stabilizing.clone();
     }
 }

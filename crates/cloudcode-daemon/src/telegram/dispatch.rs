@@ -393,17 +393,59 @@ pub async fn reply_logic(state: &DaemonState, args: &str) -> DispatchResult {
         Ok(ReplyTarget::Ready {
             session_name,
             reply_text,
-        }) => match state
-            .session_mgr
-            .send_keys(&session_name, &reply_text)
-            .await
-        {
-            Ok(()) => {
-                clear_waiting_state_from(&state.question_states, &session_name);
-                DispatchResult::plain(format!("✅ Replied to '{}'.", session_name))
+        }) => {
+            // Capture pane before replying so we can extract the response
+            let pane_before = state
+                .session_mgr
+                .capture_pane_full(&session_name)
+                .await
+                .unwrap_or_default();
+
+            match state
+                .session_mgr
+                .send_keys(&session_name, &reply_text)
+                .await
+            {
+                Ok(()) => {
+                    clear_waiting_state_from(&state.question_states, &session_name);
+
+                    // Wait briefly for output to appear, then capture
+                    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+                    let pane_after = state
+                        .session_mgr
+                        .capture_pane_full(&session_name)
+                        .await
+                        .unwrap_or_default();
+
+                    if pane_after != pane_before {
+                        // There's new output — include it in the reply
+                        let new_lines: Vec<&str> = pane_after
+                            .lines()
+                            .skip(pane_before.lines().count())
+                            .filter(|l| {
+                                let t = l.trim();
+                                !t.is_empty() && t != ">" && t != "❯" && t != "$"
+                            })
+                            .collect();
+                        if !new_lines.is_empty() {
+                            let output = new_lines.join("\n");
+                            DispatchResult::plain(format!(
+                                "✅ Replied to '{}'.\n\nOutput:\n{}",
+                                session_name, output
+                            ))
+                        } else {
+                            DispatchResult::plain(format!("✅ Replied to '{}'.", session_name))
+                        }
+                    } else {
+                        DispatchResult::plain(format!(
+                            "✅ Replied to '{}'. Output still processing — use /peek to check.",
+                            session_name
+                        ))
+                    }
+                }
+                Err(err) => DispatchResult::error(err.to_string()),
             }
-            Err(err) => DispatchResult::error(err.to_string()),
-        },
+        }
         Ok(ReplyTarget::Ambiguous(waiting)) => {
             let mut text =
                 String::from("Multiple sessions are waiting. Use /reply <session> <text>.\n");
@@ -515,34 +557,62 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
         }
     };
 
-    // Retry transient execution errors up to 3 times
-    let mut send_result = Err(anyhow::anyhow!("not started"));
-    for attempt in 0..3 {
-        send_result = state.session_mgr.send(&session_name, text).await;
-        match &send_result {
-            Ok(_) => break,
-            Err(err) => {
-                let err_str = err.to_string();
-                if super::handlers::is_auth_error(err, state.session_mgr.current_provider())
-                    || err_str.contains("does not exist")
-                    || err_str.contains("timed out")
-                {
-                    break;
-                }
-                if attempt < 2 {
-                    log::warn!(
-                        "Send attempt {} failed ({}), retrying in 5s...",
-                        attempt + 1,
-                        err_str
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    let provider = state.session_mgr.current_provider();
+    let send_result = match provider {
+        AiProvider::Codex => {
+            // Codex: route through tmux for session sync
+            state.session_mgr.send_via_tmux(&session_name, text).await
+        }
+        AiProvider::Claude => {
+            // Claude: use print mode (clean stdout, --continue preserves context)
+            // Retry transient errors up to 3 times
+            let mut result = Err(anyhow::anyhow!("not started"));
+            for attempt in 0..3 {
+                result = state.session_mgr.send(&session_name, text).await;
+                match &result {
+                    Ok(_) => break,
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if super::handlers::is_auth_error(err, state.session_mgr.current_provider())
+                            || err_str.contains("does not exist")
+                            || err_str.contains("timed out")
+                        {
+                            break;
+                        }
+                        if attempt < 2 {
+                            log::warn!(
+                                "Send attempt {} failed ({}), retrying in 5s...",
+                                attempt + 1,
+                                err_str
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                    }
                 }
             }
+            result
         }
-    }
+    };
 
     let mut final_result = match send_result {
         Ok(result) => {
+            // Claude notification bridge: echo TG activity into tmux
+            // so CLI users see what happened
+            if provider == AiProvider::Claude {
+                let summary = if result.text.len() > 200 {
+                    format!("{}...", &result.text[..200])
+                } else {
+                    result.text.clone()
+                };
+                let bridge_msg = format!(
+                    "# [TG] {}: {}",
+                    if text.len() > 80 { &text[..80] } else { text },
+                    summary.replace('\n', " ")
+                );
+                // Fire-and-forget — non-fatal if CLI user isn't attached
+                let _ = state.session_mgr.send_keys(&session_name, &bridge_msg).await;
+            }
+
             let mut dispatch = DispatchResult::markdown(result.text);
             dispatch.files = result.files;
             dispatch
