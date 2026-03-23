@@ -30,6 +30,14 @@
 **Depends on:** CloudProvider trait, ideally ships after AWS to validate the trait handles complex providers.
 **Files:** New `crates/cloudcode-cli/src/gcp/` and `crates/cloudcode-cli/src/azure/` modules
 
+## Fly.io Machines provider implementation
+**Priority:** P2
+**Why:** Fly.io is beloved by devs and offers sub-second VM boot. But Fly Machines are a fundamentally different model from Hetzner/DO: image-based (not cloud-init), app-scoped (need app + machine IDs), and SSH works through `fly ssh console` not direct IP. Needs its own design pass rather than force-fitting into the same CloudProvider trait used for traditional VPS.
+**Approach:** Evaluate whether Fly fits the CloudProvider trait or needs a separate integration path. Key questions: Can we use a custom Docker image with our setup baked in? Does `fly ssh console` give us enough for the daemon deploy pipeline? How does persistent disk work? May need `provider_state: serde_json::Value` in VpsState for composite IDs.
+**Effort:** M human / S-M with CC
+**Depends on:** CloudProvider trait shipped with Hetzner + DO. Fly is a separate follow-up with its own design.
+**Files:** New `crates/cloudcode-cli/src/fly/` module, possible state model changes
+
 ## Daytona dev environment integration
 **Priority:** P3
 **Why:** Daytona is a dev environment management platform that provisions workspaces on various backends. It's a different integration model — instead of cloudcode managing raw VMs, it delegates to Daytona's orchestration. This could make cloudcode work on any backend Daytona supports (Docker, Kubernetes, cloud VMs) without per-provider implementations.

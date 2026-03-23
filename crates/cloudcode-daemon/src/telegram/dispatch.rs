@@ -394,56 +394,70 @@ pub async fn reply_logic(state: &DaemonState, args: &str) -> DispatchResult {
             session_name,
             reply_text,
         }) => {
-            // Capture pane before replying so we can extract the response
-            let pane_before = state
-                .session_mgr
-                .capture_pane_full(&session_name)
-                .await
-                .unwrap_or_default();
+            let provider = state.session_mgr.current_provider();
 
-            match state
-                .session_mgr
-                .send_keys(&session_name, &reply_text)
-                .await
-            {
-                Ok(()) => {
-                    clear_waiting_state_from(&state.question_states, &session_name);
-
-                    // Wait briefly for output to appear, then capture
-                    tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
-                    let pane_after = state
-                        .session_mgr
-                        .capture_pane_full(&session_name)
-                        .await
-                        .unwrap_or_default();
-
-                    if pane_after != pane_before {
-                        // There's new output — include it in the reply
-                        let new_lines: Vec<&str> = pane_after
-                            .lines()
-                            .skip(pane_before.lines().count())
-                            .filter(|l| {
-                                let t = l.trim();
-                                !t.is_empty() && t != ">" && t != "❯" && t != "$"
-                            })
-                            .collect();
-                        if !new_lines.is_empty() {
-                            let output = new_lines.join("\n");
-                            DispatchResult::plain(format!(
-                                "✅ Replied to '{}'.\n\nOutput:\n{}",
-                                session_name, output
-                            ))
-                        } else {
-                            DispatchResult::plain(format!("✅ Replied to '{}'.", session_name))
-                        }
-                    } else {
-                        DispatchResult::plain(format!(
-                            "✅ Replied to '{}'. Output still processing — use /peek to check.",
-                            session_name
-                        ))
+            if provider == AiProvider::Codex {
+                // Codex: use print mode for replies (send_keys doesn't work with Codex TUI)
+                match state.session_mgr.send(&session_name, &reply_text).await {
+                    Ok(result) => {
+                        clear_waiting_state_from(&state.question_states, &session_name);
+                        let mut dispatch = DispatchResult::markdown(result.text);
+                        dispatch.files = result.files;
+                        dispatch
                     }
+                    Err(err) => DispatchResult::error(err.to_string()),
                 }
-                Err(err) => DispatchResult::error(err.to_string()),
+            } else {
+                // Claude: use send_keys + capture output
+                let pane_before = state
+                    .session_mgr
+                    .capture_pane_full(&session_name)
+                    .await
+                    .unwrap_or_default();
+
+                match state
+                    .session_mgr
+                    .send_keys(&session_name, &reply_text)
+                    .await
+                {
+                    Ok(()) => {
+                        clear_waiting_state_from(&state.question_states, &session_name);
+
+                        // Wait briefly for output to appear, then capture
+                        tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+                        let pane_after = state
+                            .session_mgr
+                            .capture_pane_full(&session_name)
+                            .await
+                            .unwrap_or_default();
+
+                        if pane_after != pane_before {
+                            let new_lines: Vec<&str> = pane_after
+                                .lines()
+                                .skip(pane_before.lines().count())
+                                .filter(|l| {
+                                    let t = l.trim();
+                                    !t.is_empty() && t != ">" && t != "❯" && t != "$"
+                                })
+                                .collect();
+                            if !new_lines.is_empty() {
+                                let output = new_lines.join("\n");
+                                DispatchResult::plain(format!(
+                                    "✅ Replied to '{}'.\n\nOutput:\n{}",
+                                    session_name, output
+                                ))
+                            } else {
+                                DispatchResult::plain(format!("✅ Replied to '{}'.", session_name))
+                            }
+                        } else {
+                            DispatchResult::plain(format!(
+                                "✅ Replied to '{}'. Output still processing — use /peek to check.",
+                                session_name
+                            ))
+                        }
+                    }
+                    Err(err) => DispatchResult::error(err.to_string()),
+                }
             }
         }
         Ok(ReplyTarget::Ambiguous(waiting)) => {
@@ -560,8 +574,33 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
     let provider = state.session_mgr.current_provider();
     let send_result = match provider {
         AiProvider::Codex => {
-            // Codex: route through tmux for session sync
-            state.session_mgr.send_via_tmux(&session_name, text).await
+            // Codex: use print mode (codex exec).
+            // send_via_tmux doesn't work with Codex's TUI input handler.
+            let mut result = Err(anyhow::anyhow!("not started"));
+            for attempt in 0..3 {
+                result = state.session_mgr.send(&session_name, text).await;
+                match &result {
+                    Ok(_) => break,
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if super::handlers::is_auth_error(err, state.session_mgr.current_provider())
+                            || err_str.contains("does not exist")
+                            || err_str.contains("timed out")
+                        {
+                            break;
+                        }
+                        if attempt < 2 {
+                            log::warn!(
+                                "Send attempt {} failed ({}), retrying in 5s...",
+                                attempt + 1,
+                                err_str
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            }
+            result
         }
         AiProvider::Claude => {
             // Claude: use print mode (clean stdout, --continue preserves context)
