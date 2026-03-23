@@ -291,7 +291,8 @@ pub struct App {
 impl App {
     pub fn new(force_wizard: bool) -> Result<Self> {
         let config = Config::load()?;
-        let existing_config = config.hetzner.is_some() && config.claude.is_some();
+        let existing_config =
+            config.hetzner.is_some() && (config.claude.is_some() || config.codex.is_some());
         let vps_state = VpsState::load().unwrap_or_default();
         let ssh_key_exists = Config::ssh_key_path().map(|p| p.exists()).unwrap_or(false);
 
