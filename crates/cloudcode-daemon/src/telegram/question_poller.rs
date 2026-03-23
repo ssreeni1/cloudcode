@@ -38,8 +38,8 @@ pub fn new_question_states() -> QuestionStates {
 #[derive(Clone, Debug)]
 pub enum ActivityState {
     Idle,
-    Active { since: Instant },
-    Stabilizing { since: Instant, active_since: Instant },
+    Active { since: Instant, pane_snapshot: String },
+    Stabilizing { since: Instant, active_since: Instant, pane_snapshot: String },
 }
 
 /// Shared flag to coordinate with send_via_tmux
@@ -271,13 +271,17 @@ pub async fn run_poller(
                 // Content is changing — session is active
                 match activity {
                     ActivityState::Idle => {
-                        *activity = ActivityState::Active { since: Instant::now() };
-                        // Take file baseline when entering active state
-                        // (for detecting new files on completion)
+                        *activity = ActivityState::Active {
+                            since: Instant::now(),
+                            pane_snapshot: content.clone(),
+                        };
                     }
-                    ActivityState::Stabilizing { active_since, .. } => {
+                    ActivityState::Stabilizing { active_since, pane_snapshot, .. } => {
                         // Was stabilizing but content changed again — back to active
-                        *activity = ActivityState::Active { since: *active_since };
+                        *activity = ActivityState::Active {
+                            since: *active_since,
+                            pane_snapshot: pane_snapshot.clone(),
+                        };
                     }
                     ActivityState::Active { .. } => {
                         // Already active, keep going
@@ -285,14 +289,15 @@ pub async fn run_poller(
                 }
             } else if stable_count >= 2 {
                 match activity.clone() {
-                    ActivityState::Active { since: active_since } => {
+                    ActivityState::Active { since: active_since, pane_snapshot } => {
                         // Just stabilized after being active
                         *activity = ActivityState::Stabilizing {
                             since: Instant::now(),
                             active_since,
+                            pane_snapshot: pane_snapshot.clone(),
                         };
                     }
-                    ActivityState::Stabilizing { active_since, since: stab_since } => {
+                    ActivityState::Stabilizing { active_since, since: stab_since, pane_snapshot } => {
                         // Check if stable long enough AND was active long enough
                         let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(10);
                         let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
@@ -334,9 +339,49 @@ pub async fn run_poller(
 
                                     log::info!("Task completion detected in session '{}'", session.name);
 
+                                    // Extract the response by diffing the pane snapshot
+                                    // from when activity started vs now
+                                    let before_lines: Vec<&str> = pane_snapshot.lines().collect();
+                                    let after_lines: Vec<&str> = content.lines().collect();
+                                    let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
+                                        after_lines[before_lines.len()..]
+                                            .iter()
+                                            .copied()
+                                            .filter(|l| {
+                                                let t = l.trim();
+                                                !t.is_empty()
+                                                    && t != ">"
+                                                    && t != "❯"
+                                                    && t != "$"
+                                                    && !t.contains("bypass permissions")
+                                                    && !t.contains("shift+tab")
+                                                    && !t.starts_with("───")
+                                                    && !t.starts_with("━━━")
+                                            })
+                                            .collect()
+                                    } else {
+                                        vec![]
+                                    };
+
+                                    let response_text = if new_lines.is_empty() {
+                                        "Use /peek to see output.".to_string()
+                                    } else {
+                                        // Truncate to ~3500 chars to fit in TG message
+                                        let joined = new_lines.join("\n");
+                                        if joined.len() > 3500 {
+                                            format!("{}...\n\n(truncated — use /peek for full output)", &joined[..3500])
+                                        } else {
+                                            joined
+                                        }
+                                    };
+
+                                    let escaped = response_text
+                                        .replace('&', "&amp;")
+                                        .replace('<', "&lt;")
+                                        .replace('>', "&gt;");
                                     let msg = format!(
-                                        "✅ <b>[{}]</b> Task completed. Use /peek to see output.",
-                                        session.name
+                                        "✅ <b>[{}]</b> Task completed:\n\n<pre>{}</pre>",
+                                        session.name, escaped
                                     );
                                     let _ = sender.send_html(owner_id, &msg).await;
                                 }
@@ -558,10 +603,11 @@ mod tests {
     fn test_activity_state_transitions() {
         // Just verify the enum can be constructed and cloned
         let idle = ActivityState::Idle;
-        let active = ActivityState::Active { since: Instant::now() };
+        let active = ActivityState::Active { since: Instant::now(), pane_snapshot: "test".to_string() };
         let stabilizing = ActivityState::Stabilizing {
             since: Instant::now(),
             active_since: Instant::now(),
+            pane_snapshot: "test".to_string(),
         };
         let _ = idle.clone();
         let _ = active.clone();
