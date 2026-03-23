@@ -26,7 +26,7 @@ fn attach_ssh_args(ip: &str, session: &str) -> Vec<String> {
         "ControlPath=none".to_string(),
         "-t".to_string(), // force PTY allocation
         format!("claude@{}", ip),
-        format!("tmux display-message -t {} -d 5000 'Detach: Ctrl-b then d'; tmux attach-session -t {}", quoted_session, quoted_session),
+        format!("tmux display-message -t {} -d 5000 'Press Ctrl-y to detach'; tmux attach-session -t {}", quoted_session, quoted_session),
     ]
 }
 
@@ -75,11 +75,7 @@ pub async fn run(session: String) -> Result<()> {
     );
     println!(
         "{}",
-        "  To return to cloudcode: press Ctrl-b, then d (two separate keypresses)".dimmed()
-    );
-    println!(
-        "{}",
-        "  Session stays alive in the background after detaching.".dimmed()
+        "  Press Ctrl-y to detach (session stays alive in background)".dimmed()
     );
     println!(
         "{}",
