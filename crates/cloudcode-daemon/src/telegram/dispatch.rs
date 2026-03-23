@@ -636,8 +636,10 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
     let mut final_result = match send_result {
         Ok(result) => {
             // Notification bridge: echo TG activity into tmux
-            // so CLI users see what happened (both providers)
-            {
+            // so CLI users see what happened.
+            // Claude only — Codex exec is a separate process so echoing
+            // into the interactive tmux just confuses Codex's TUI.
+            if provider == AiProvider::Claude {
                 let summary = if result.text.len() > 200 {
                     format!("{}...", &result.text[..200])
                 } else {
