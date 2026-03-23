@@ -469,14 +469,12 @@ impl SessionManager {
             bail!("tmux new-session failed with status {}", status);
         }
 
-        // Bind Ctrl-y to detach for this session (simpler than Ctrl-b d).
-        // Per-session binding, does not affect other tmux sessions.
-        // Failure is non-fatal (cosmetic only).
+        // Bind Ctrl-y to detach (simpler than Ctrl-b d).
+        // Global binding (bind-key doesn't support per-session).
+        // Harmless for non-cloudcode tmux sessions. Idempotent.
         let _ = Command::new("tmux")
             .args([
                 "bind-key",
-                "-t",
-                &name,
                 "-n",  // no prefix needed
                 "C-y",
                 "detach-client",
