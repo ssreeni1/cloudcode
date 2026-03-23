@@ -23,13 +23,14 @@ pub trait TelegramSender: Send + Sync {
 
 pub struct TeloxideSender {
     bot: teloxide::Bot,
-    api_url: String,
+    bot_api_base: String,
 }
 
 impl TeloxideSender {
     pub fn new(bot: teloxide::Bot) -> Self {
-        let api_url = bot.api_url().to_string();
-        Self { bot, api_url }
+        let token = bot.token();
+        let bot_api_base = format!("https://api.telegram.org/bot{}", token);
+        Self { bot, bot_api_base }
     }
 }
 
@@ -68,9 +69,7 @@ impl TelegramSender for TeloxideSender {
     }
 
     async fn edit_html(&self, chat_id: i64, message_id: i64, html: &str) -> Result<()> {
-        // Use raw reqwest for edit since teloxide's edit_message_text
-        // requires features not in our build
-        let url = format!("{}editMessageText", self.api_url);
+        let url = format!("{}/editMessageText", self.bot_api_base);
         reqwest::Client::new()
             .post(&url)
             .json(&serde_json::json!({
