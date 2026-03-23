@@ -138,8 +138,8 @@ pub async fn run_poller(
     let mut stable_polls: HashMap<String, u8> = HashMap::new();
     // Track last sent question hash per session for dedup
     let mut last_sent_hash: HashMap<String, u64> = HashMap::new();
-    // Per-session: (tg_message_id, pane_snapshot_at_activity_start)
-    let mut activity_states: HashMap<String, (i64, String)> = HashMap::new();
+    // Per-session: (tg_message_id, pane_snapshot_at_activity_start, consecutive_changes)
+    let mut activity_states: HashMap<String, (i64, String, u8)> = HashMap::new();
     let mut completion_file_baselines: HashMap<String, HashMap<PathBuf, (SystemTime, u64)>> = HashMap::new();
     let mut last_completion_hash: HashMap<String, u64> = HashMap::new();
 
@@ -194,7 +194,7 @@ pub async fn run_poller(
                 {
                     let msg_id = activity_states
                         .get(&session.name)
-                        .map(|(id, _)| *id)
+                        .map(|(id, _, _)| *id)
                         .unwrap_or(0);
                     Some((question.clone(), msg_id))
                 } else {
@@ -215,7 +215,7 @@ pub async fn run_poller(
                     );
                     let _ = sender.edit_html(owner_id, msg_id, &msg).await;
                     // Reset streaming state
-                    activity_states.insert(session.name.clone(), (0, String::new()));
+                    activity_states.insert(session.name.clone(), (0, String::new(), 0));
                 }
                 continue;
             }
@@ -304,18 +304,17 @@ pub async fn run_poller(
 
             let stream_entry = activity_states
                 .entry(session.name.clone())
-                .or_insert((0i64, String::new())); // (tg_message_id, pane_at_start)
-
-            eprintln!(
-                "[poller:{}] stabilized={} stable_count={} msg_id={} has_prev={}",
-                session.name, stabilized, stable_count, stream_entry.0,
-                prev_content.contains_key(&session.name)
-            );
+                .or_insert((0i64, String::new(), 0u8));
 
             if !stabilized {
-                // Content is changing — definitely not idle
-                if stream_entry.0 == 0 && prev_content.contains_key(&session.name) {
-                    // First real change (and we have a baseline) — send "Working..."
+                // Content is changing — count consecutive changes
+                stream_entry.2 = stream_entry.2.saturating_add(1);
+
+                if stream_entry.0 == 0
+                    && stream_entry.2 >= 3
+                    && prev_content.contains_key(&session.name)
+                {
+                    // 3+ consecutive changes = sustained AI activity, send "Working..."
                     let msg_id = sender
                         .send_html_returning_id(
                             owner_id,
@@ -365,7 +364,13 @@ pub async fn run_poller(
                         let _ = sender.edit_html(owner_id, stream_entry.0, &html).await;
                     }
                 }
-            } else if stream_entry.0 != 0 && stable_count >= 2 {
+            } else {
+                // Content stabilized — reset consecutive change counter
+                stream_entry.2 = 0;
+
+                if stream_entry.0 == 0 || stable_count < 2 {
+                    // No active message or not stable enough yet — skip
+                } else if stream_entry.0 != 0 && stable_count >= 2 {
                 // Content stabilized and we have an active streaming message.
                 eprintln!("[poller:{}] CHECKING COMPLETION (stable_count={})", session.name, stable_count);
                 let recent_lines: Vec<&str> = content
@@ -474,6 +479,7 @@ pub async fn run_poller(
                     // Reset — ready for next task
                     stream_entry.0 = 0;
                     stream_entry.1.clear();
+                }
                 }
             }
         }
