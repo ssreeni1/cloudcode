@@ -38,8 +38,18 @@ pub fn new_question_states() -> QuestionStates {
 #[derive(Clone, Debug)]
 pub enum ActivityState {
     Idle,
-    Active { since: Instant, pane_snapshot: String },
-    Stabilizing { since: Instant, active_since: Instant, pane_snapshot: String },
+    Active {
+        since: Instant,
+        pane_snapshot: String,
+        /// TG message ID for streaming updates (0 if not sent yet)
+        tg_message_id: i64,
+    },
+    Stabilizing {
+        since: Instant,
+        active_since: Instant,
+        pane_snapshot: String,
+        tg_message_id: i64,
+    },
 }
 
 /// Shared flag to coordinate with send_via_tmux
@@ -271,33 +281,79 @@ pub async fn run_poller(
                 // Content is changing — session is active
                 match activity {
                     ActivityState::Idle => {
+                        // Send initial "working" message to TG
+                        let msg_id = sender
+                            .send_html_returning_id(
+                                owner_id,
+                                &format!("⏳ <b>[{}]</b> Working...", session.name),
+                            )
+                            .await
+                            .unwrap_or(0);
                         *activity = ActivityState::Active {
                             since: Instant::now(),
                             pane_snapshot: content.clone(),
+                            tg_message_id: msg_id,
                         };
                     }
-                    ActivityState::Stabilizing { active_since, pane_snapshot, .. } => {
+                    ActivityState::Stabilizing { active_since, pane_snapshot, tg_message_id, .. } => {
                         // Was stabilizing but content changed again — back to active
                         *activity = ActivityState::Active {
                             since: *active_since,
                             pane_snapshot: pane_snapshot.clone(),
+                            tg_message_id: *tg_message_id,
                         };
                     }
-                    ActivityState::Active { .. } => {
-                        // Already active, keep going
+                    ActivityState::Active { tg_message_id, pane_snapshot, .. } => {
+                        // Stream update: edit the TG message with latest output
+                        if *tg_message_id != 0 {
+                            let before_lines: Vec<&str> = pane_snapshot.lines().collect();
+                            let after_lines: Vec<&str> = content.lines().collect();
+                            let new_lines: Vec<&str> = if after_lines.len() > before_lines.len() {
+                                after_lines[before_lines.len()..]
+                                    .iter()
+                                    .copied()
+                                    .filter(|l| {
+                                        let t = l.trim();
+                                        !t.is_empty()
+                                            && !t.starts_with("───")
+                                            && !t.starts_with("━━━")
+                                            && !t.contains("bypass permissions")
+                                    })
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+                            if !new_lines.is_empty() {
+                                let text = new_lines.join("\n");
+                                let truncated = if text.len() > 3500 {
+                                    format!("{}...", &text[..3500])
+                                } else {
+                                    text
+                                };
+                                let escaped = truncated
+                                    .replace('&', "&amp;")
+                                    .replace('<', "&lt;")
+                                    .replace('>', "&gt;");
+                                let html = format!(
+                                    "⏳ <b>[{}]</b> Working...\n\n<pre>{}</pre>",
+                                    session.name, escaped
+                                );
+                                let _ = sender.edit_html(owner_id, *tg_message_id, &html).await;
+                            }
+                        }
                     }
                 }
             } else if stable_count >= 2 {
                 match activity.clone() {
-                    ActivityState::Active { since: active_since, pane_snapshot } => {
-                        // Just stabilized after being active
+                    ActivityState::Active { since: active_since, pane_snapshot, tg_message_id } => {
                         *activity = ActivityState::Stabilizing {
                             since: Instant::now(),
                             active_since,
                             pane_snapshot: pane_snapshot.clone(),
+                            tg_message_id,
                         };
                     }
-                    ActivityState::Stabilizing { active_since, since: stab_since, pane_snapshot } => {
+                    ActivityState::Stabilizing { active_since, since: stab_since, pane_snapshot, tg_message_id } => {
                         // Check if stable long enough AND was active long enough
                         let was_active_long_enough = active_since.elapsed() > std::time::Duration::from_secs(3);
                         let stable_long_enough = stab_since.elapsed() > std::time::Duration::from_secs(4);
@@ -383,7 +439,13 @@ pub async fn run_poller(
                                         "✅ <b>[{}]</b> Task completed:\n\n<pre>{}</pre>",
                                         session.name, escaped
                                     );
-                                    let _ = sender.send_html(owner_id, &msg).await;
+                                    // Edit the streaming message if we have one,
+                                    // otherwise send a new message
+                                    if tg_message_id != 0 {
+                                        let _ = sender.edit_html(owner_id, tg_message_id, &msg).await;
+                                    } else {
+                                        let _ = sender.send_html(owner_id, &msg).await;
+                                    }
                                 }
                             }
 
@@ -603,11 +665,12 @@ mod tests {
     fn test_activity_state_transitions() {
         // Just verify the enum can be constructed and cloned
         let idle = ActivityState::Idle;
-        let active = ActivityState::Active { since: Instant::now(), pane_snapshot: "test".to_string() };
+        let active = ActivityState::Active { since: Instant::now(), pane_snapshot: "test".to_string(), tg_message_id: 0 };
         let stabilizing = ActivityState::Stabilizing {
             since: Instant::now(),
             active_since: Instant::now(),
             pane_snapshot: "test".to_string(),
+            tg_message_id: 0,
         };
         let _ = idle.clone();
         let _ = active.clone();

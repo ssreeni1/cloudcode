@@ -9,6 +9,10 @@ use super::formatter;
 pub trait TelegramSender: Send + Sync {
     async fn send_text(&self, chat_id: i64, text: &str) -> Result<()>;
     async fn send_html(&self, chat_id: i64, html: &str) -> Result<()>;
+    /// Send HTML and return the message ID (for later editing).
+    async fn send_html_returning_id(&self, chat_id: i64, html: &str) -> Result<i64>;
+    /// Edit an existing message by ID.
+    async fn edit_html(&self, chat_id: i64, message_id: i64, html: &str) -> Result<()>;
     async fn send_photo(&self, chat_id: i64, path: &Path, caption: &str) -> Result<()>;
     async fn send_document(&self, chat_id: i64, path: &Path, caption: &str) -> Result<()>;
 }
@@ -19,11 +23,13 @@ pub trait TelegramSender: Send + Sync {
 
 pub struct TeloxideSender {
     bot: teloxide::Bot,
+    api_url: String,
 }
 
 impl TeloxideSender {
     pub fn new(bot: teloxide::Bot) -> Self {
-        Self { bot }
+        let api_url = bot.api_url().to_string();
+        Self { bot, api_url }
     }
 }
 
@@ -46,6 +52,36 @@ impl TelegramSender for TeloxideSender {
             .parse_mode(ParseMode::Html)
             .await
             .map_err(|e| anyhow::anyhow!("send_html failed: {}", e))?;
+        Ok(())
+    }
+
+    async fn send_html_returning_id(&self, chat_id: i64, html: &str) -> Result<i64> {
+        use teloxide::prelude::*;
+        use teloxide::types::ParseMode;
+        let msg = self
+            .bot
+            .send_message(teloxide::types::ChatId(chat_id), html)
+            .parse_mode(ParseMode::Html)
+            .await
+            .map_err(|e| anyhow::anyhow!("send_html failed: {}", e))?;
+        Ok(msg.id.0 as i64)
+    }
+
+    async fn edit_html(&self, chat_id: i64, message_id: i64, html: &str) -> Result<()> {
+        // Use raw reqwest for edit since teloxide's edit_message_text
+        // requires features not in our build
+        let url = format!("{}editMessageText", self.api_url);
+        reqwest::Client::new()
+            .post(&url)
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": html,
+                "parse_mode": "HTML",
+            }))
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("edit_html failed: {}", e))?;
         Ok(())
     }
 
@@ -146,6 +182,38 @@ impl TelegramSender for ReqwestSender {
                     .error_for_status()?;
             }
         }
+        Ok(())
+    }
+
+    async fn send_html_returning_id(&self, chat_id: i64, html: &str) -> Result<i64> {
+        let resp = self
+            .client
+            .post(format!("{}/sendMessage", self.base_url))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "text": html,
+                "parse_mode": "HTML",
+            }))
+            .send()
+            .await?;
+        let body: serde_json::Value = resp.json().await?;
+        let msg_id = body["result"]["message_id"]
+            .as_i64()
+            .unwrap_or(0);
+        Ok(msg_id)
+    }
+
+    async fn edit_html(&self, chat_id: i64, message_id: i64, html: &str) -> Result<()> {
+        self.client
+            .post(format!("{}/editMessageText", self.base_url))
+            .json(&serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": html,
+                "parse_mode": "HTML",
+            }))
+            .send()
+            .await?;
         Ok(())
     }
 
