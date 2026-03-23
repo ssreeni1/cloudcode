@@ -430,15 +430,14 @@ pub async fn run_poller(
                         .map(|idx| idx + 1) // start AFTER the prompt line
                         .unwrap_or(0);
 
-                    // Get lines after the prompt, filter UI chrome
-                    let response_lines: Vec<&str> = all_lines[response_start..]
+                    // Extract the FINAL answer — the last • or ● bullet
+                    // and its continuation lines. Everything before is trace.
+                    let after_prompt: Vec<&str> = all_lines[response_start..]
                         .iter()
                         .copied()
                         .filter(|l| {
                             let t = l.trim();
                             !t.is_empty()
-                                // Keep AI output (• bullets, indented text, code)
-                                // Filter UI chrome
                                 && t != ">"
                                 && t != "❯"
                                 && t != "›"
@@ -453,15 +452,36 @@ pub async fn run_poller(
                         })
                         .collect();
 
-                    let response_text = if response_lines.is_empty() {
-                        "Use /peek to see output.".to_string()
+                    // Find the last bullet point (• or ●) — that's the final answer
+                    let last_bullet_idx = after_prompt
+                        .iter()
+                        .rposition(|l| {
+                            let t = l.trim();
+                            t.starts_with("•") || t.starts_with("●")
+                        });
+
+                    let answer_lines: Vec<&str> = match last_bullet_idx {
+                        Some(idx) => {
+                            // Take the bullet and any continuation lines after it
+                            // (indented lines that are part of the same response)
+                            after_prompt[idx..]
+                                .iter()
+                                .copied()
+                                .collect()
+                        }
+                        None => {
+                            // No bullet found — take the last few lines
+                            after_prompt.iter().rev().take(5).copied()
+                                .collect::<Vec<_>>().into_iter().rev().collect()
+                        }
+                    };
+
+                    let response_text = if answer_lines.is_empty() {
+                        "/peek to see output".to_string()
                     } else {
-                        let joined = response_lines.join("\n");
+                        let joined = answer_lines.join("\n");
                         if joined.len() > 3500 {
-                            format!(
-                                "{}...\n\n/peek for full output",
-                                &joined[..3500]
-                            )
+                            format!("{}...", &joined[..3500])
                         } else {
                             joined
                         }
@@ -472,8 +492,8 @@ pub async fn run_poller(
                         .replace('<', "&lt;")
                         .replace('>', "&gt;");
                     let msg = format!(
-                        "✅ <b>[{}]</b> Done:\n\n{}",
-                        session.name, escaped
+                        "✅ <b>[{}]</b> Done:\n\n{}\n\n<i>/peek {} for full trace</i>",
+                        session.name, escaped, session.name
                     );
                     let _ = sender.edit_html(owner_id, stream_entry.0, &msg).await;
 
