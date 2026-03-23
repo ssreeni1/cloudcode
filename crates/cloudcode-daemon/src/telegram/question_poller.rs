@@ -306,24 +306,10 @@ pub async fn run_poller(
                 .entry(session.name.clone())
                 .or_insert((0i64, String::new())); // (tg_message_id, pane_at_start)
 
-            // Check if content looks like an idle prompt (don't trigger on idle)
-            let looks_idle = {
-                let recent: Vec<&str> = content
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .rev()
-                    .take(5)
-                    .collect();
-                recent.iter().any(|line| {
-                    let t = line.trim();
-                    t == "❯" || t == "❯ " || t == ">" || t.contains("bypass permissions")
-                })
-            };
-
-            if !stabilized && !looks_idle {
-                // Content is changing and doesn't look idle
-                if stream_entry.0 == 0 {
-                    // First real change — send "Working..." and save snapshot
+            if !stabilized {
+                // Content is changing — definitely not idle
+                if stream_entry.0 == 0 && prev_content.contains_key(&session.name) {
+                    // First real change (and we have a baseline) — send "Working..."
                     let msg_id = sender
                         .send_html_returning_id(
                             owner_id,
@@ -373,7 +359,7 @@ pub async fn run_poller(
                         let _ = sender.edit_html(owner_id, stream_entry.0, &html).await;
                     }
                 }
-            } else if stream_entry.0 != 0 && (stable_count >= 2 || looks_idle) {
+            } else if stream_entry.0 != 0 && stable_count >= 2 {
                 // Content stabilized and we have an active streaming message.
                 // Check if we're at an idle prompt (completion).
                 let recent_lines: Vec<&str> = content
