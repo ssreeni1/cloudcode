@@ -98,10 +98,10 @@ static OPENCODE_META: ProviderMeta = ProviderMeta {
 static PI_META: ProviderMeta = ProviderMeta {
     binary: "pi",
     display_name: "Pi",
-    install_cmd: "npm install -g @anthropic/pi",
+    install_cmd: "npm install -g @mariozechner/pi-coding-agent",
     version_cmd: "pi --version",
     auth_files: &[".config/pi/credentials.json"],
-    auth_env_vars: &["PI_API_KEY"],
+    auth_env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
     stable: false,
     idle_patterns: &["λ", "λ "],
     prompt_patterns: &["Pi v", "pi ready"],
@@ -109,11 +109,11 @@ static PI_META: ProviderMeta = ProviderMeta {
 };
 
 static CURSOR_META: ProviderMeta = ProviderMeta {
-    binary: "cursor",
+    binary: "cursor-agent",
     display_name: "Cursor",
-    install_cmd: "npm install -g @cursor/cli",
-    version_cmd: "cursor --version",
-    auth_files: &[".config/cursor/auth.json"],
+    install_cmd: "curl -fsSL https://cursor.com/install | bash",
+    version_cmd: "cursor-agent --version",
+    auth_files: &[".cursor/auth.json"],
     auth_env_vars: &["CURSOR_API_KEY"],
     stable: false,
     idle_patterns: &["▶", "▶ "],
@@ -198,28 +198,28 @@ impl AiProvider {
             }
             Self::Amp => {
                 format!(
-                    "while true; do {home}/.local/bin/amp --non-interactive; \
+                    "while true; do /usr/local/bin/amp; \
                      echo '\\n[cloudcode] Amp exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
             Self::OpenCode => {
                 format!(
-                    "while true; do {home}/.local/bin/opencode; \
+                    "while true; do /usr/local/bin/opencode; \
                      echo '\\n[cloudcode] OpenCode exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
             Self::Pi => {
                 format!(
-                    "while true; do /usr/local/bin/pi --non-interactive; \
+                    "while true; do /usr/local/bin/pi; \
                      echo '\\n[cloudcode] Pi exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
             Self::Cursor => {
                 format!(
-                    "while true; do /usr/local/bin/cursor --non-interactive; \
+                    "while true; do {home}/.local/bin/cursor-agent; \
                      echo '\\n[cloudcode] Cursor exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
@@ -366,14 +366,14 @@ mod tests {
     }
 
     #[test]
-    fn meta_binary_matches_as_str() {
-        // Claude and Codex binary names match their as_str
+    fn meta_binary_is_correct() {
         assert_eq!(AiProvider::Claude.meta().binary, "claude");
         assert_eq!(AiProvider::Codex.meta().binary, "codex");
         assert_eq!(AiProvider::Amp.meta().binary, "amp");
         assert_eq!(AiProvider::OpenCode.meta().binary, "opencode");
         assert_eq!(AiProvider::Pi.meta().binary, "pi");
-        assert_eq!(AiProvider::Cursor.meta().binary, "cursor");
+        // Cursor CLI binary is "cursor-agent", not "cursor"
+        assert_eq!(AiProvider::Cursor.meta().binary, "cursor-agent");
     }
 
     #[test]
