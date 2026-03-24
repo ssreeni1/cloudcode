@@ -78,6 +78,7 @@ pub enum SlashCommand {
     Init,
     Help,
     Health,
+    Doctor,
     Quit,
 }
 
@@ -130,6 +131,7 @@ impl SlashCommand {
             Self::Down => vec!["down".into()],
             Self::Open(s) => vec!["open".into(), s.clone()],
             // Internal
+            Self::Doctor => vec!["doctor".into()],
             Self::Init | Self::Help | Self::Health | Self::Quit => vec![],
         }
     }
@@ -155,6 +157,7 @@ impl SlashCommand {
             Self::Init => "/init".into(),
             Self::Help => "/help".into(),
             Self::Health => "/health".into(),
+            Self::Doctor => "/doctor".into(),
             Self::Quit => "/quit".into(),
         }
     }
@@ -210,6 +213,7 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
         }
         "init" | "setup" => ParseResult::Ok(SlashCommand::Init),
         "health" => ParseResult::Ok(SlashCommand::Health),
+        "doctor" => ParseResult::Ok(SlashCommand::Doctor),
         "help" | "h" | "?" => ParseResult::Ok(SlashCommand::Help),
         "quit" | "q" | "exit" => ParseResult::Ok(SlashCommand::Quit),
         other => ParseResult::Unknown(other.to_string()),
@@ -1109,7 +1113,15 @@ impl App {
                         self.error_message = None;
                         self.refresh_health_cache();
                     }
+                    ParseResult::Ok(SlashCommand::Doctor) => {
+                        self.show_health = false;
+                        self.show_help = false;
+                        self.error_message = None;
+                        self.spawn_captured_command(SlashCommand::Doctor);
+                    }
                     ParseResult::Ok(SlashCommand::Init) => {
+                        self.show_health = false;
+                        self.show_help = false;
                         if self.vps_state.is_provisioned() {
                             self.error_message = Some(
                                 "VPS is running. Run /down first to tear it down before re-initializing.".to_string(),
@@ -1124,6 +1136,7 @@ impl App {
                         // Show server type picker before provisioning
                         self.error_message = None;
                         self.show_help = false;
+                        self.show_health = false;
                         let location = self
                             .config
                             .vps
@@ -1162,6 +1175,8 @@ impl App {
                     }
                     ParseResult::Ok(SlashCommand::Down) => {
                         // Inline confirmation before destroying VPS
+                        self.show_health = false;
+                        self.show_help = false;
                         self.inline_prompt = Some(InlinePrompt {
                             label: "Destroy VPS? This cannot be undone. Type 'yes' to confirm: "
                                 .to_string(),
@@ -1172,6 +1187,8 @@ impl App {
                     }
                     ParseResult::Ok(SlashCommand::Spawn(None)) => {
                         // Prompt for session name inline
+                        self.show_health = false;
+                        self.show_help = false;
                         self.inline_prompt = Some(InlinePrompt {
                             label: "Session name (empty to auto-generate): ".to_string(),
                             callback: PromptCallback::Spawn,
@@ -1180,6 +1197,8 @@ impl App {
                         self.error_message = None;
                     }
                     ParseResult::Ok(cmd) => {
+                        self.show_health = false;
+                        self.show_help = false;
                         if cmd.is_interactive() {
                             self.pending_command = Some(cmd);
                             self.error_message = None;

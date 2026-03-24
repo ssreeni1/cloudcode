@@ -172,55 +172,53 @@ impl AiProvider {
         }
     }
 
+    /// Resolve the absolute path for this provider's binary on the VPS.
+    ///
+    /// Checks `~/.local/bin/<binary>` first (curl/pip installers), then
+    /// `/usr/local/bin/<binary>` (npm -g installs).  Falls back to just the
+    /// bare binary name so the shell's PATH can still find it.
+    pub fn resolve_bin(&self, home: &str) -> String {
+        let binary = self.meta().binary;
+        let local = format!("{home}/.local/bin/{binary}");
+        let global = format!("/usr/local/bin/{binary}");
+        // At spawn-command build time we can't stat the remote FS, so we
+        // emit a small shell snippet that picks the first existing path.
+        // This makes the tmux command resilient to the binary living in
+        // either location.
+        format!(
+            "$(if [ -x {local} ]; then echo {local}; elif [ -x {global} ]; then echo {global}; else echo {binary}; fi)"
+        )
+    }
+
     /// Build the shell command to spawn this provider in a tmux session.
     ///
     /// `home` is the $HOME directory on the remote VPS (e.g. "/home/claude").
     pub fn spawn_command(&self, home: &str) -> String {
+        let bin = self.resolve_bin(home);
+        let name = self.display_name();
         match self {
             Self::Claude => {
-                let bin = format!("{home}/.local/bin/claude");
                 format!(
                     "while true; do {bin} --dangerously-skip-permissions --permission-mode bypassPermissions; \
-                     echo '\\n[cloudcode] Claude exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
             Self::Codex => {
                 format!(
-                    "if ! /usr/local/bin/codex login status >/dev/null 2>&1; then \
-                       echo '[cloudcode] Codex needs authentication. Starting device auth flow...'; \
-                       /usr/local/bin/codex login --device-auth; \
+                    "if ! {bin} login status >/dev/null 2>&1; then \
+                       echo '[cloudcode] {name} needs authentication. Starting device auth flow...'; \
+                       {bin} login --device-auth; \
                      fi; \
-                     while true; do /usr/local/bin/codex --add-dir {home}/.cloudcode/contexts; \
-                     echo '\\n[cloudcode] Codex exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     while true; do {bin} --add-dir {home}/.cloudcode/contexts; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
-            Self::Amp => {
+            _ => {
                 format!(
-                    "while true; do /usr/local/bin/amp; \
-                     echo '\\n[cloudcode] Amp exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                     sleep 3; done"
-                )
-            }
-            Self::OpenCode => {
-                format!(
-                    "while true; do /usr/local/bin/opencode; \
-                     echo '\\n[cloudcode] OpenCode exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                     sleep 3; done"
-                )
-            }
-            Self::Pi => {
-                format!(
-                    "while true; do /usr/local/bin/pi; \
-                     echo '\\n[cloudcode] Pi exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                     sleep 3; done"
-                )
-            }
-            Self::Cursor => {
-                format!(
-                    "while true; do {home}/.local/bin/cursor-agent; \
-                     echo '\\n[cloudcode] Cursor exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                    "while true; do {bin}; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }

@@ -488,6 +488,7 @@ ExecStart=/usr/local/bin/cloudcode-daemon /etc/cloudcode/daemon.toml
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/claude/.cloudcode-env
 WorkingDirectory=/home/claude
 ProtectSystem=strict

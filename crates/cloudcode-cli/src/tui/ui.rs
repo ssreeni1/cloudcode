@@ -1372,6 +1372,18 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
         ("", "", "", ""),
         ("Other", "", "", ""),
         ("  /init", "", "Re-run setup wizard", "cloudcode init"),
+        (
+            "  /health",
+            "",
+            "Credential health dashboard",
+            "",
+        ),
+        (
+            "  /doctor",
+            "",
+            "Run diagnostic checks",
+            "cloudcode doctor",
+        ),
         ("  /help", "", "Show this reference", ""),
     ];
 
