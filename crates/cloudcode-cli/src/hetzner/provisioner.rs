@@ -75,7 +75,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
 
       for attempt in 1 2 3; do
         echo "OpenCode install attempt $attempt..."
-        if timeout 15m bash -c 'curl -fsSL https://opencode.ai/install | bash' && command -v opencode >/dev/null 2>&1; then
+        if timeout 15m bash -c 'export HOME=/home/claude && curl -fsSL https://opencode.ai/install | bash' && command -v opencode >/dev/null 2>&1; then
           echo '{"status":"ready"}' > "$STATUS_FILE"
           chown claude:claude "$STATUS_FILE"
           chmod 0600 "$STATUS_FILE"
@@ -163,7 +163,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
 
       for attempt in 1 2 3; do
         echo "Cursor install attempt $attempt..."
-        if timeout 15m bash -c 'curl https://cursor.com/install -fsSL | bash' && command -v cursor >/dev/null 2>&1; then
+        if timeout 15m bash -c 'export HOME=/home/claude && curl https://cursor.com/install -fsSL | bash' && (command -v cursor-agent >/dev/null 2>&1 || test -x /home/claude/.local/bin/cursor-agent); then
           echo '{"status":"ready"}' > "$STATUS_FILE"
           chown claude:claude "$STATUS_FILE"
           chmod 0600 "$STATUS_FILE"
