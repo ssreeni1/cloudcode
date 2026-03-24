@@ -15,4 +15,6 @@ pub struct SessionInfo {
     pub state: SessionState,
     pub created_at: u64,
     pub last_activity: u64,
+    #[serde(default)]
+    pub provider: Option<String>,
 }

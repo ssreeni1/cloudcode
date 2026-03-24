@@ -235,7 +235,7 @@ mod daemon_response {
             name: "test".to_string(),
             state: SessionState::Running,
             created_at: 1700000000,
-            last_activity: 1700000100,
+            last_activity: 1700000100, provider: None,
         }
     }
 
@@ -547,7 +547,7 @@ mod newline_delimited_protocol {
             name: "s".to_string(),
             state: SessionState::Running,
             created_at: 100,
-            last_activity: 200,
+            last_activity: 200, provider: None,
         };
 
         let responses: Vec<DaemonResponse> = vec![
@@ -631,7 +631,7 @@ mod newline_delimited_protocol {
             name: "x".to_string(),
             state: SessionState::Idle,
             created_at: 0,
-            last_activity: 0,
+            last_activity: 0, provider: None,
         };
 
         let responses = vec![
@@ -681,8 +681,8 @@ mod newline_delimited_protocol {
                 name: "s".to_string(),
                 state: SessionState::Running,
                 created_at: 1,
-                last_activity: 1,
-            },
+                last_activity: 1, provider: None,
+        },
         };
 
         let mut stream = String::new();

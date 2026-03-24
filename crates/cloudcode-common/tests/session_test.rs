@@ -100,7 +100,7 @@ mod session_info {
             name: "my-session".to_string(),
             state: SessionState::Running,
             created_at: 1700000000,
-            last_activity: 1700000100,
+            last_activity: 1700000100, provider: None,
         }
     }
 
@@ -141,8 +141,8 @@ mod session_info {
                 name: "s".to_string(),
                 state,
                 created_at: 0,
-                last_activity: 0,
-            };
+                last_activity: 0, provider: None,
+        };
             let json = serde_json::to_string(&info).unwrap();
             let deserialized: SessionInfo = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized.state, state);
@@ -155,7 +155,7 @@ mod session_info {
             name: "s".to_string(),
             state: SessionState::Starting,
             created_at: 0,
-            last_activity: 0,
+            last_activity: 0, provider: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -169,7 +169,7 @@ mod session_info {
             name: "s".to_string(),
             state: SessionState::Idle,
             created_at: u64::MAX,
-            last_activity: u64::MAX,
+            last_activity: u64::MAX, provider: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: SessionInfo = serde_json::from_str(&json).unwrap();
@@ -183,7 +183,7 @@ mod session_info {
             name: String::new(),
             state: SessionState::Dead,
             created_at: 0,
-            last_activity: 0,
+            last_activity: 0, provider: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: SessionInfo = serde_json::from_str(&json).unwrap();

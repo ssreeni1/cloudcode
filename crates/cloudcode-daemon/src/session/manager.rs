@@ -588,11 +588,13 @@ impl SessionManager {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let provider_name = self.session_provider(&name).display_name().to_string();
         Ok(SessionInfo {
             name,
             state: SessionState::Running,
             created_at: now,
             last_activity: now,
+            provider: Some(provider_name),
         })
     }
 
@@ -618,11 +620,13 @@ impl SessionManager {
                         let name = parts.first().unwrap_or(&"unknown").to_string();
                         let created_at = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                         let last_activity = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let provider = self.session_provider(&name).display_name().to_string();
                         SessionInfo {
                             name,
                             state: SessionState::Running,
                             created_at,
                             last_activity,
+                            provider: Some(provider),
                         }
                     })
                     .collect();
