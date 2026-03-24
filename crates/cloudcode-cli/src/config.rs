@@ -1,8 +1,73 @@
 use anyhow::{Context, Result};
 pub use cloudcode_common::provider::AiProvider;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+// ---------------------------------------------------------------------------
+// CloudKind — which infrastructure provider is active
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudKind {
+    Hetzner,
+    #[serde(alias = "digitalocean")]
+    DigitalOcean,
+}
+
+impl fmt::Display for CloudKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Hetzner => write!(f, "hetzner"),
+            Self::DigitalOcean => write!(f, "digitalocean"),
+        }
+    }
+}
+
+impl FromStr for CloudKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "hetzner" => Ok(Self::Hetzner),
+            "digitalocean" | "do" => Ok(Self::DigitalOcean),
+            other => anyhow::bail!("unknown cloud provider: {other}"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DOConfig — DigitalOcean credentials
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DOConfig {
+    pub api_token: String,
+}
+
+// ---------------------------------------------------------------------------
+// CloudConfig — unified cloud infrastructure config
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CloudConfig {
+    pub provider: CloudKind,
+    pub hetzner: Option<HetznerConfig>,
+    pub digitalocean: Option<DOConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// AiProviderConfig — single reusable struct for all AI provider credentials
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AiProviderConfig {
+    pub auth_method: AuthMethod,
+    pub api_key: Option<String>,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CodexConfig {
@@ -12,12 +77,20 @@ pub struct CodexConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
+    /// Legacy top-level hetzner section — kept for backward compatibility.
+    /// New configs should use `cloud.hetzner` instead.
     pub hetzner: Option<HetznerConfig>,
     pub claude: Option<ClaudeConfig>,
     pub codex: Option<CodexConfig>,
+    pub amp: Option<AiProviderConfig>,
+    pub opencode: Option<AiProviderConfig>,
+    pub pi: Option<AiProviderConfig>,
+    pub cursor: Option<AiProviderConfig>,
     pub telegram: Option<TelegramConfig>,
     pub vps: Option<VpsConfig>,
     pub default_provider: Option<AiProvider>,
+    /// New unified cloud config (v2 format).
+    pub cloud: Option<CloudConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +194,11 @@ impl Config {
         crate::paths::config_file()
     }
 
+    /// Load config, tolerating both v1 (`[hetzner]`) and v2 (`[cloud.hetzner]`) formats.
+    ///
+    /// If `[cloud]` is present, it takes precedence. If only the legacy top-level
+    /// `[hetzner]` section exists, it is kept as-is so callers can read it without
+    /// requiring migration. Migration only happens explicitly via `migrate_v1_to_v2()`.
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         if !path.exists() {
@@ -128,7 +206,65 @@ impl Config {
         }
         let content = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read config from {}", path.display()))?;
-        toml::from_str(&content).context("Failed to parse config")
+        let config: Self = toml::from_str(&content).context("Failed to parse config")?;
+        Ok(config)
+    }
+
+    /// Returns the effective cloud provider kind.
+    ///
+    /// Checks `cloud.provider` first, then falls back to `Hetzner` if the legacy
+    /// top-level `[hetzner]` section is present. Returns `None` if no cloud
+    /// provider is configured at all.
+    pub fn effective_cloud_kind(&self) -> Option<CloudKind> {
+        if let Some(ref cloud) = self.cloud {
+            return Some(cloud.provider);
+        }
+        if self.hetzner.is_some() {
+            return Some(CloudKind::Hetzner);
+        }
+        None
+    }
+
+    /// Returns the effective Hetzner config, checking `cloud.hetzner` first,
+    /// then falling back to the legacy top-level `[hetzner]` section.
+    pub fn effective_hetzner(&self) -> Option<&HetznerConfig> {
+        self.cloud
+            .as_ref()
+            .and_then(|c| c.hetzner.as_ref())
+            .or(self.hetzner.as_ref())
+    }
+
+    /// Migrate v1 (top-level `[hetzner]`) config to v2 (`[cloud]` section).
+    ///
+    /// This is idempotent — if `cloud` is already set, it's a no-op.
+    /// Only call from `init` / `up` commands, never from read-only paths.
+    pub fn migrate_v1_to_v2(&mut self) {
+        if self.cloud.is_some() {
+            return;
+        }
+        if let Some(ref hetzner) = self.hetzner {
+            self.cloud = Some(CloudConfig {
+                provider: CloudKind::Hetzner,
+                hetzner: Some(HetznerConfig {
+                    api_token: hetzner.api_token.clone(),
+                }),
+                digitalocean: None,
+            });
+        }
+    }
+
+    /// Save config with a `.v1.bak` backup of the existing file.
+    ///
+    /// Use this when performing destructive operations like migration so the
+    /// user can recover if something goes wrong.
+    pub fn save_with_backup(&self) -> Result<()> {
+        let path = Self::path()?;
+        if path.exists() {
+            let backup = path.with_extension("toml.v1.bak");
+            fs::copy(&path, &backup)
+                .with_context(|| format!("Failed to create backup at {}", backup.display()))?;
+        }
+        self.save()
     }
 
     pub fn save(&self) -> Result<()> {
@@ -178,6 +314,7 @@ mod tests {
         assert!(config.vps.is_none());
         assert!(config.codex.is_none());
         assert!(config.default_provider.is_none());
+        assert!(config.cloud.is_none());
     }
 
     #[test]
@@ -191,6 +328,7 @@ mod tests {
         assert!(deserialized.vps.is_none());
         assert!(deserialized.codex.is_none());
         assert!(deserialized.default_provider.is_none());
+        assert!(deserialized.cloud.is_none());
     }
 
     #[test]
@@ -205,6 +343,10 @@ mod tests {
                 oauth_token: None,
             }),
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: Some(TelegramConfig {
                 bot_token: "123456:ABC-DEF".to_string(),
                 owner_id: 987654321,
@@ -216,6 +358,7 @@ mod tests {
                 image: Some("ubuntu-24.04".to_string()),
             }),
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -247,9 +390,14 @@ mod tests {
             }),
             claude: None,
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: None,
             vps: None,
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -269,6 +417,10 @@ mod tests {
             }),
             claude: None,
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: None,
             vps: Some(VpsConfig {
                 server_type: Some("cx23".to_string()),
@@ -276,6 +428,7 @@ mod tests {
                 image: None,
             }),
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -295,6 +448,10 @@ mod tests {
             hetzner: None,
             claude: None,
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: None,
             vps: Some(VpsConfig {
                 server_type: None,
@@ -302,6 +459,7 @@ mod tests {
                 image: None,
             }),
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -323,9 +481,14 @@ mod tests {
                 oauth_token: Some("oauth-tok-xyz".to_string()),
             }),
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: None,
             vps: None,
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -374,6 +537,10 @@ owner_id = 42
             hetzner: None,
             claude: None,
             codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: Some(TelegramConfig {
                 bot_token: "tok".to_string(),
                 owner_id: -1,
@@ -381,6 +548,7 @@ owner_id = 42
             }),
             vps: None,
             default_provider: None,
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -429,9 +597,14 @@ owner_id = 42
                 auth_method: AuthMethod::ApiKey,
                 api_key: Some("sk-openai-key".to_string()),
             }),
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
             telegram: None,
             vps: None,
             default_provider: Some(AiProvider::Codex),
+            cloud: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -459,5 +632,232 @@ api_key = "sk-ant-key"
         assert!(config.codex.is_none());
         assert!(config.default_provider.is_none());
         assert!(config.claude.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // CloudKind tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cloud_kind_from_str() {
+        assert_eq!("hetzner".parse::<CloudKind>().unwrap(), CloudKind::Hetzner);
+        assert_eq!("Hetzner".parse::<CloudKind>().unwrap(), CloudKind::Hetzner);
+        assert_eq!("HETZNER".parse::<CloudKind>().unwrap(), CloudKind::Hetzner);
+        assert_eq!(
+            "digitalocean".parse::<CloudKind>().unwrap(),
+            CloudKind::DigitalOcean
+        );
+        assert_eq!(
+            "DigitalOcean".parse::<CloudKind>().unwrap(),
+            CloudKind::DigitalOcean
+        );
+        assert_eq!("do".parse::<CloudKind>().unwrap(), CloudKind::DigitalOcean);
+        assert!("aws".parse::<CloudKind>().is_err());
+    }
+
+    #[test]
+    fn cloud_kind_display() {
+        assert_eq!(CloudKind::Hetzner.to_string(), "hetzner");
+        assert_eq!(CloudKind::DigitalOcean.to_string(), "digitalocean");
+    }
+
+    #[test]
+    fn cloud_kind_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&CloudKind::Hetzner).unwrap(),
+            "\"hetzner\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CloudKind::DigitalOcean).unwrap(),
+            "\"digital_ocean\""
+        );
+        // Deserialize both snake_case and alias
+        assert_eq!(
+            serde_json::from_str::<CloudKind>("\"digital_ocean\"").unwrap(),
+            CloudKind::DigitalOcean
+        );
+        assert_eq!(
+            serde_json::from_str::<CloudKind>("\"digitalocean\"").unwrap(),
+            CloudKind::DigitalOcean
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CloudConfig / dual-read tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dual_read_old_hetzner_format() {
+        // v1 config: top-level [hetzner] only, no [cloud]
+        let toml_str = r#"
+[hetzner]
+api_token = "old-token"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud.is_none());
+        assert_eq!(config.hetzner.as_ref().unwrap().api_token, "old-token");
+        // effective_cloud_kind falls back to legacy
+        assert_eq!(config.effective_cloud_kind(), Some(CloudKind::Hetzner));
+        // effective_hetzner falls back to legacy
+        assert_eq!(config.effective_hetzner().unwrap().api_token, "old-token");
+    }
+
+    #[test]
+    fn dual_read_new_cloud_format() {
+        let toml_str = r#"
+[cloud]
+provider = "hetzner"
+
+[cloud.hetzner]
+api_token = "new-token"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.hetzner.is_none());
+        assert_eq!(config.effective_cloud_kind(), Some(CloudKind::Hetzner));
+        assert_eq!(config.effective_hetzner().unwrap().api_token, "new-token");
+    }
+
+    #[test]
+    fn dual_read_cloud_takes_precedence_over_legacy() {
+        // Both old [hetzner] and new [cloud.hetzner] present — cloud wins
+        let toml_str = r#"
+[hetzner]
+api_token = "old-token"
+
+[cloud]
+provider = "hetzner"
+
+[cloud.hetzner]
+api_token = "new-token"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.effective_cloud_kind(), Some(CloudKind::Hetzner));
+        assert_eq!(config.effective_hetzner().unwrap().api_token, "new-token");
+    }
+
+    #[test]
+    fn cloud_digitalocean_config() {
+        let toml_str = r#"
+[cloud]
+provider = "digital_ocean"
+
+[cloud.digitalocean]
+api_token = "do-token-123"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.effective_cloud_kind(),
+            Some(CloudKind::DigitalOcean)
+        );
+        let cloud = config.cloud.unwrap();
+        assert_eq!(cloud.digitalocean.unwrap().api_token, "do-token-123");
+        assert!(cloud.hetzner.is_none());
+    }
+
+    #[test]
+    fn no_cloud_provider_configured() {
+        let config = Config::default();
+        assert_eq!(config.effective_cloud_kind(), None);
+        assert!(config.effective_hetzner().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Migration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_v1_to_v2_moves_hetzner() {
+        let mut config = Config {
+            hetzner: Some(HetznerConfig {
+                api_token: "legacy-tok".to_string(),
+            }),
+            cloud: None,
+            ..Config::default()
+        };
+
+        config.migrate_v1_to_v2();
+
+        let cloud = config.cloud.as_ref().unwrap();
+        assert_eq!(cloud.provider, CloudKind::Hetzner);
+        assert_eq!(cloud.hetzner.as_ref().unwrap().api_token, "legacy-tok");
+        assert!(cloud.digitalocean.is_none());
+        // Legacy field is preserved (not cleared) — callers that read it still work
+        assert!(config.hetzner.is_some());
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_is_idempotent() {
+        let mut config = Config {
+            hetzner: Some(HetznerConfig {
+                api_token: "legacy-tok".to_string(),
+            }),
+            cloud: Some(CloudConfig {
+                provider: CloudKind::DigitalOcean,
+                hetzner: None,
+                digitalocean: Some(DOConfig {
+                    api_token: "do-tok".to_string(),
+                }),
+            }),
+            ..Config::default()
+        };
+
+        config.migrate_v1_to_v2();
+
+        // cloud is untouched — DO config preserved
+        let cloud = config.cloud.as_ref().unwrap();
+        assert_eq!(cloud.provider, CloudKind::DigitalOcean);
+        assert_eq!(cloud.digitalocean.as_ref().unwrap().api_token, "do-tok");
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_noop_when_no_hetzner() {
+        let mut config = Config::default();
+        config.migrate_v1_to_v2();
+        assert!(config.cloud.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // AiProviderConfig tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ai_provider_config_roundtrip() {
+        let cfg = AiProviderConfig {
+            auth_method: AuthMethod::ApiKey,
+            api_key: Some("sk-test".to_string()),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let deserialized: AiProviderConfig = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized.auth_method, AuthMethod::ApiKey));
+        assert_eq!(deserialized.api_key, Some("sk-test".to_string()));
+    }
+
+    #[test]
+    fn cloud_config_full_toml_roundtrip() {
+        let config = Config {
+            hetzner: None,
+            claude: None,
+            codex: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
+            telegram: None,
+            vps: None,
+            default_provider: None,
+            cloud: Some(CloudConfig {
+                provider: CloudKind::Hetzner,
+                hetzner: Some(HetznerConfig {
+                    api_token: "hz-tok".to_string(),
+                }),
+                digitalocean: None,
+            }),
+        };
+
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&toml_str).unwrap();
+        let cloud = deserialized.cloud.unwrap();
+        assert_eq!(cloud.provider, CloudKind::Hetzner);
+        assert_eq!(cloud.hetzner.unwrap().api_token, "hz-tok");
     }
 }

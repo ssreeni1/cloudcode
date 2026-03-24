@@ -4,6 +4,7 @@ mod config;
 mod deploy;
 mod hetzner;
 mod paths;
+mod providers;
 mod ssh;
 mod state;
 mod tui;

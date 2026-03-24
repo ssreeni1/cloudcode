@@ -4,10 +4,22 @@ use dialoguer::{Confirm, Input, Select};
 use std::process::Command as ProcessCommand;
 
 use crate::config::{
-    AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig,
-    TelegramMode,
+    AiProvider, AiProviderConfig, AuthMethod, ClaudeConfig, CloudConfig, CloudKind, CodexConfig,
+    Config, HetznerConfig, TelegramConfig, TelegramMode,
 };
-use crate::hetzner::client::HetznerClient;
+use crate::providers;
+
+/// Check whether a given AI provider has config set.
+fn has_provider_config(config: &Config, provider: AiProvider) -> bool {
+    match provider {
+        AiProvider::Claude => config.claude.is_some(),
+        AiProvider::Codex => config.codex.is_some(),
+        AiProvider::Amp => config.amp.is_some(),
+        AiProvider::OpenCode => config.opencode.is_some(),
+        AiProvider::Pi => config.pi.is_some(),
+        AiProvider::Cursor => config.cursor.is_some(),
+    }
+}
 
 /// Mask a secret string, showing only the first 4 characters followed by dots.
 fn mask_secret(s: &str) -> String {
@@ -57,8 +69,24 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
 
     let mut config = Config::load()?;
 
+    // Migrate v1 config if old [hetzner] exists without [cloud]
+    if config.hetzner.is_some() && config.cloud.is_none() {
+        println!(
+            "  {}",
+            "Migrating v1 config to v2 format...".yellow()
+        );
+        config.migrate_v1_to_v2();
+        config.save_with_backup()?;
+        println!(
+            "  {} Config migrated (backup saved as .v1.bak)",
+            "✓".green().bold()
+        );
+    }
+
     // Init re-run protection
-    if !reauth && config.hetzner.is_some() && (config.claude.is_some() || config.codex.is_some()) {
+    let has_cloud = config.effective_cloud_kind().is_some();
+    let has_ai = config.claude.is_some() || config.codex.is_some();
+    if !reauth && has_cloud && has_ai {
         print!(
             "  {} ",
             "Configuration already exists. Overwrite? [y/N]".yellow()
@@ -78,115 +106,178 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         println!("  {}", "Re-authentication mode.".yellow());
     }
 
-    // Step 1: Hetzner setup
-    if !reauth || config.hetzner.is_none() {
-        println!("\n{}", "Step 1: Hetzner Cloud Setup".bold().cyan());
+    // Step 1: Cloud provider selection
+    if !reauth || config.effective_cloud_kind().is_none() {
+        println!("\n{}", "Step 1: Cloud Provider Setup".bold().cyan());
 
-        let has_account = Confirm::new()
-            .with_prompt("Do you have a Hetzner Cloud account?")
-            .default(true)
-            .interact()?;
-
-        if !has_account {
-            let url = "https://console.hetzner.cloud/";
-            println!("  {}", "Opening Hetzner Cloud signup...".cyan());
-            if open::that(url).is_err() {
-                println!("  {} {}", "→".dimmed(), url.dimmed());
-            }
-            println!(
-                "  {}",
-                "Create an account and come back when you have an API token.".yellow()
-            );
-        }
-
-        println!(
-            "  {}",
-            "Create a token with Read & Write access at console.hetzner.cloud → Security → API Tokens"
-                .dimmed()
-        );
-        let api_token: String = Input::new()
-            .with_prompt("Enter your Hetzner API token")
-            .interact_text()?;
-
-        println!("  Validating token...");
-        let client = HetznerClient::new(api_token.clone());
-        match client.validate_token().await {
-            Ok(()) => {
-                println!(
-                    "  {} Token validated ({})",
-                    "✓".green().bold(),
-                    mask_secret(&api_token).dimmed()
-                );
-            }
-            Err(e) => {
-                println!(
-                    "  {} {}",
-                    "✗".red().bold(),
-                    format!("Token validation failed: {e}").red()
-                );
-                return Err(e);
-            }
-        }
-
-        config.hetzner = Some(HetznerConfig { api_token });
-    }
-
-    // Step 2: AI Provider selection
-    let (wants_claude, wants_codex) = if !reauth {
-        println!("\n{}", "Step 2: AI Provider".bold().cyan());
-
-        let provider_options = vec!["Claude (Anthropic)", "Codex (OpenAI)", "Both"];
-        let provider_selection = Select::new()
-            .with_prompt("Which AI provider would you like to use?")
-            .items(&provider_options)
+        // Only Hetzner is available for now (DigitalOcean coming soon)
+        let cloud_options = vec!["Hetzner Cloud"];
+        let cloud_selection = Select::new()
+            .with_prompt("Which cloud provider would you like to use?")
+            .items(&cloud_options)
             .default(0)
             .interact()?;
 
-        match provider_selection {
+        match cloud_selection {
             0 => {
-                config.default_provider = Some(AiProvider::Claude);
-                println!(
-                    "  {} Claude selected as default provider",
-                    "✓".green().bold()
-                );
-                (true, false)
-            }
-            1 => {
-                config.default_provider = Some(AiProvider::Codex);
-                println!(
-                    "  {} Codex selected as default provider",
-                    "✓".green().bold()
-                );
-                (false, true)
-            }
-            2 => {
-                let default_options = vec!["Claude", "Codex"];
-                let default_selection = Select::new()
-                    .with_prompt("Which provider should be the default?")
-                    .items(&default_options)
-                    .default(0)
+                // Hetzner
+                let has_account = Confirm::new()
+                    .with_prompt("Do you have a Hetzner Cloud account?")
+                    .default(true)
                     .interact()?;
-                config.default_provider = Some(if default_selection == 0 {
-                    AiProvider::Claude
-                } else {
-                    AiProvider::Codex
-                });
+
+                if !has_account {
+                    let url = "https://console.hetzner.cloud/";
+                    println!("  {}", "Opening Hetzner Cloud signup...".cyan());
+                    if open::that(url).is_err() {
+                        println!("  {} {}", "→".dimmed(), url.dimmed());
+                    }
+                    println!(
+                        "  {}",
+                        "Create an account and come back when you have an API token.".yellow()
+                    );
+                }
+
                 println!(
-                    "  {} Both providers, default: {}",
-                    "✓".green().bold(),
-                    config.default_provider.unwrap().display_name()
+                    "  {}",
+                    "Create a token with Read & Write access at console.hetzner.cloud → Security → API Tokens"
+                        .dimmed()
                 );
-                (true, true)
+                let api_token: String = Input::new()
+                    .with_prompt("Enter your Hetzner API token")
+                    .interact_text()?;
+
+                println!("  Validating token...");
+                let provider = providers::cloud_provider("hetzner", api_token.clone())?;
+                match provider.validate_credentials().await {
+                    Ok(()) => {
+                        println!(
+                            "  {} Token validated ({})",
+                            "✓".green().bold(),
+                            mask_secret(&api_token).dimmed()
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} {}",
+                            "✗".red().bold(),
+                            format!("Token validation failed: {e}").red()
+                        );
+                        return Err(e);
+                    }
+                }
+
+                config.cloud = Some(CloudConfig {
+                    provider: CloudKind::Hetzner,
+                    hetzner: Some(HetznerConfig {
+                        api_token: api_token.clone(),
+                    }),
+                    digitalocean: None,
+                });
+                // Keep legacy field for backward compat
+                config.hetzner = Some(HetznerConfig { api_token });
             }
             _ => unreachable!(),
         }
+    }
+
+    // Step 2: AI Provider selection
+    let all_providers = [
+        AiProvider::Claude,
+        AiProvider::Codex,
+        AiProvider::Amp,
+        AiProvider::OpenCode,
+        AiProvider::Pi,
+        AiProvider::Cursor,
+    ];
+    let selected_providers: Vec<AiProvider> = if !reauth {
+        println!("\n{}", "Step 2: AI Provider".bold().cyan());
+
+        let provider_options: Vec<String> = all_providers
+            .iter()
+            .map(|p| {
+                let meta = p.meta();
+                let stability = if meta.stable { "" } else { " (experimental)" };
+                format!("{}{}", p.display_name(), stability)
+            })
+            .collect();
+
+        // Multi-select: ask which providers to enable
+        let mut selected = Vec::new();
+        for (i, label) in provider_options.iter().enumerate() {
+            let default = matches!(all_providers[i], AiProvider::Claude);
+            let enable = Confirm::new()
+                .with_prompt(format!("Enable {}?", label))
+                .default(default)
+                .interact()?;
+            if enable {
+                selected.push(all_providers[i]);
+            }
+        }
+
+        if selected.is_empty() {
+            println!(
+                "  {} {}",
+                "✗".red().bold(),
+                "At least one AI provider must be selected.".red()
+            );
+            anyhow::bail!("No AI provider selected");
+        }
+
+        // Pick default provider
+        if selected.len() == 1 {
+            config.default_provider = Some(selected[0]);
+            println!(
+                "  {} {} selected as default provider",
+                "✓".green().bold(),
+                selected[0].display_name()
+            );
+        } else {
+            let default_options: Vec<&str> = selected.iter().map(|p| p.display_name()).collect();
+            let default_selection = Select::new()
+                .with_prompt("Which provider should be the default?")
+                .items(&default_options)
+                .default(0)
+                .interact()?;
+            config.default_provider = Some(selected[default_selection]);
+            println!(
+                "  {} {} providers, default: {}",
+                "✓".green().bold(),
+                selected.len(),
+                config.default_provider.unwrap().display_name()
+            );
+        }
+
+        selected
     } else {
         // In reauth mode, keep existing provider choices
-        (
-            config.claude.is_some() || config.default_provider != Some(AiProvider::Codex),
-            config.codex.is_some() || config.default_provider == Some(AiProvider::Codex),
-        )
+        let mut selected = Vec::new();
+        if config.claude.is_some() {
+            selected.push(AiProvider::Claude);
+        }
+        if config.codex.is_some() {
+            selected.push(AiProvider::Codex);
+        }
+        if config.amp.is_some() {
+            selected.push(AiProvider::Amp);
+        }
+        if config.opencode.is_some() {
+            selected.push(AiProvider::OpenCode);
+        }
+        if config.pi.is_some() {
+            selected.push(AiProvider::Pi);
+        }
+        if config.cursor.is_some() {
+            selected.push(AiProvider::Cursor);
+        }
+        if selected.is_empty() {
+            selected.push(AiProvider::Claude);
+        }
+        selected
     };
+
+    let wants_claude = selected_providers.contains(&AiProvider::Claude);
+    let wants_codex = selected_providers.contains(&AiProvider::Codex);
 
     // Step 3: Claude auth
     if wants_claude && (!reauth || config.claude.is_none()) {
@@ -317,11 +408,67 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
         config.codex = Some(codex_config);
     }
 
-    // Step 5: Telegram (optional)
+    // Step 5: Auth for additional providers (Amp, OpenCode, Pi, Cursor)
+    for &provider in &[AiProvider::Amp, AiProvider::OpenCode, AiProvider::Pi, AiProvider::Cursor] {
+        if !selected_providers.contains(&provider) {
+            continue;
+        }
+        let meta = provider.meta();
+        let step_label = format!("Step 5: {} Authentication", provider.display_name());
+        if !reauth || !has_provider_config(&config, provider) {
+            println!("\n{}", step_label.bold().cyan());
+
+            if !meta.stable {
+                println!(
+                    "  {} {}",
+                    "!".yellow().bold(),
+                    format!("{} is experimental — headless auth may not work yet.", provider.display_name()).yellow()
+                );
+            }
+
+            let auth_options = vec!["API Key", "Skip (configure later)"];
+            let auth_selection = Select::new()
+                .with_prompt(format!("How would you like to authenticate with {}?", provider.display_name()))
+                .items(&auth_options)
+                .default(0)
+                .interact()?;
+
+            let provider_config = match auth_selection {
+                0 => {
+                    let api_key: String = Input::new()
+                        .with_prompt(format!("Enter your {} API key", provider.display_name()))
+                        .interact_text()?;
+                    println!(
+                        "  {} API key saved ({})",
+                        "✓".green().bold(),
+                        mask_secret(&api_key).dimmed()
+                    );
+                    Some(AiProviderConfig {
+                        auth_method: AuthMethod::ApiKey,
+                        api_key: Some(api_key),
+                    })
+                }
+                _ => {
+                    println!("  {} Skipped", "−".dimmed());
+                    None
+                }
+            };
+
+            match provider {
+                AiProvider::Amp => config.amp = provider_config,
+                AiProvider::OpenCode => config.opencode = provider_config,
+                AiProvider::Pi => config.pi = provider_config,
+                AiProvider::Cursor => config.cursor = provider_config,
+                _ => {}
+            }
+        }
+    }
+
+    // Step 6: Telegram (optional)
     if !reauth {
         println!(
             "\n{}",
-            "Step 5: Telegram Notifications (Optional)".bold().cyan()
+            "Step 6: Telegram Notifications (Optional)".bold().cyan()
         );
 
         let setup_telegram = Confirm::new()

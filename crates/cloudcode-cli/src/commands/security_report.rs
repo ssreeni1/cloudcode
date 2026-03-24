@@ -54,7 +54,7 @@ pub struct DoctorReport {
     pub claude_auth: Option<ClaudeAuthKind>,
     pub telegram_enabled: bool,
     pub provisioned: bool,
-    pub server_id: Option<u64>,
+    pub server_id: Option<String>,
     pub server_ip: Option<String>,
     pub status: Option<String>,
 }
@@ -90,7 +90,7 @@ fn build_doctor_report(config: &Config, state: &VpsState) -> Result<DoctorReport
         claude_auth,
         telegram_enabled: config.telegram.is_some(),
         provisioned: state.is_provisioned(),
-        server_id: state.server_id,
+        server_id: state.server_id.clone(),
         server_ip: state.server_ip.clone(),
         status: state.status_name().map(str::to_string),
     })
@@ -248,12 +248,20 @@ mod tests {
             telegram: None,
             vps: None,
             default_provider: None,
+            cloud: None,
+            amp: None,
+            opencode: None,
+            pi: None,
+            cursor: None,
         };
         let state = VpsState {
-            server_id: Some(42),
+            server_id: Some("42".to_string()),
             server_ip: Some("1.2.3.4".to_string()),
             ssh_key_id: None,
             status: Some(VpsStatus::Running),
+            cloud_provider: Some("hetzner".to_string()),
+            server_type: None,
+            location: None,
         };
 
         let report = build_doctor_report(&config, &state);

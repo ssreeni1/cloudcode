@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
 use std::time::Duration;
@@ -29,7 +29,10 @@ pub async fn run() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Hetzner not configured"))?;
 
     let client = HetznerClient::new(hetzner_config.api_token.clone());
-    let server_id = state.server_id.unwrap();
+    let server_id_str = state.server_id.clone().unwrap();
+    let server_id: u64 = server_id_str
+        .parse()
+        .context("server_id is not a valid u64 (Hetzner)")?;
 
     let vps_config = config.vps.as_ref();
     let server_type = vps_config

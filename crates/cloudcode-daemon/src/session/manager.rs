@@ -146,13 +146,34 @@ fn is_sendable_file(path: &PathBuf) -> bool {
 /// Find the claude binary — checks ~/.local/bin/claude (curl installer)
 /// then /usr/local/bin/claude (npm installer).
 fn find_claude_bin() -> String {
+    find_provider_bin("claude")
+}
+
+/// Find a provider binary by name. Checks common install locations and falls
+/// back to `which` so that npm -g installs (/usr/local/bin) are found too.
+fn find_provider_bin(binary: &str) -> String {
     let home = daemon_home_dir();
-    let local_bin = home.join(".local/bin/claude");
+    // curl/pip installers typically put binaries here
+    let local_bin = home.join(".local/bin").join(binary);
     if local_bin.exists() {
         return local_bin.to_string_lossy().to_string();
     }
-    // npm global install path
-    "/usr/local/bin/claude".to_string()
+    // npm -g installs go here
+    let global_bin = format!("/usr/local/bin/{}", binary);
+    if std::path::Path::new(&global_bin).exists() {
+        return global_bin;
+    }
+    // Fallback: use `which` to search PATH
+    if let Ok(output) = std::process::Command::new("which").arg(binary).output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+    // Last resort: assume ~/.local/bin (will fail with a clear error)
+    local_bin.to_string_lossy().to_string()
 }
 
 /// Strip ANSI escape codes from a string.
@@ -379,7 +400,7 @@ impl SessionManager {
     }
 
     /// Get the provider for a specific session (reads per-session file, falls back to default).
-    fn session_provider(&self, session: &str) -> AiProvider {
+    pub fn session_provider(&self, session: &str) -> AiProvider {
         let path = daemon_home_dir()
             .join(".cloudcode")
             .join("sessions")
@@ -454,29 +475,7 @@ impl SessionManager {
         // Wrap in a retry loop so the tmux session survives if the provider
         // exits (e.g. OAuth login required). The user can `open` the session,
         // complete OAuth, and the provider restarts automatically.
-        let shell_cmd = match provider {
-            AiProvider::Claude => {
-                let claude_bin = find_claude_bin();
-                format!(
-                    "while true; do {} --dangerously-skip-permissions --permission-mode bypassPermissions; \
-                     echo '\\n[cloudcode] Claude exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                     sleep 3; done",
-                    claude_bin
-                )
-            }
-            AiProvider::Codex => {
-                // Use device-auth for OAuth login on remote VPS (localhost redirect won't work).
-                // Check login status first; only prompt if not authenticated.
-                "if ! /usr/local/bin/codex login status >/dev/null 2>&1; then \
-                   echo '[cloudcode] Codex needs authentication. Starting device auth flow...'; \
-                   /usr/local/bin/codex login --device-auth; \
-                 fi; \
-                 while true; do /usr/local/bin/codex --add-dir /home/claude/.cloudcode/contexts; \
-                 echo '\\n[cloudcode] Codex exited. Restarting in 3s... (Ctrl-C to stop)'; \
-                 sleep 3; done"
-                    .to_string()
-            }
-        };
+        let shell_cmd = provider.spawn_command(&home);
         // Create session-scoped temp dir
         let session_tmp = daemon_home_dir()
             .join(".cloudcode")
@@ -751,6 +750,21 @@ impl SessionManager {
                     .await
                     .map_err(|_| anyhow::anyhow!("AI subprocess timed out after 5 minutes"))?
                     .context("Failed to run codex exec")?
+            }
+            // New providers: generic exec via binary from meta()
+            _ => {
+                let meta = provider.meta();
+                let bin = find_provider_bin(meta.binary);
+                let fut = Command::new(&bin)
+                    .args(["--non-interactive", message])
+                    .env("CLOUDCODE_SESSION_NAME", session)
+                    .env("TMPDIR", &session_tmp)
+                    .current_dir(&workdir)
+                    .output();
+                timeout(AI_TIMEOUT, fut)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("AI subprocess timed out after 5 minutes"))?
+                    .with_context(|| format!("Failed to run {} exec", meta.binary))?
             }
         };
 

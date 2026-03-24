@@ -76,10 +76,18 @@ fn ensure_known_hosts_file(path: &PathBuf) -> Result<()> {
 }
 
 /// Path to the daemon forwarding socket for a given server
-pub fn daemon_socket_path(server_id: u64) -> Result<PathBuf> {
+pub fn daemon_socket_path(server_id: &str) -> Result<PathBuf> {
     let dir = crate::paths::sockets_dir()?;
     std::fs::create_dir_all(&dir).context("Failed to create sockets directory")?;
-    Ok(dir.join(format!("daemon-{}.sock", server_id)))
+    // Socket paths have a ~108 char limit on Unix. Use a short stable suffix
+    // derived from the server ID to stay within bounds.
+    let suffix = if server_id.len() <= 20 {
+        server_id.to_string()
+    } else {
+        // For long IDs (UUIDs etc.), use the first 16 chars
+        server_id[..16].to_string()
+    };
+    Ok(dir.join(format!("daemon-{}.sock", suffix)))
 }
 
 #[cfg(test)]

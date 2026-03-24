@@ -22,7 +22,7 @@ impl DaemonClient {
     /// Open SSH tunnel to daemon and return a client
     pub fn connect(state: &VpsState, _config: &Config) -> Result<Self> {
         let ip = state.server_ip.as_ref().context("No server IP")?;
-        let server_id = state.server_id.context("No server ID")?;
+        let server_id = state.server_id.as_ref().context("No server ID")?;
         let socket_path = daemon_socket_path(server_id)?;
 
         let mut client = Self {
@@ -428,8 +428,8 @@ mod tests {
 
     #[test]
     fn daemon_socket_path_is_unique_per_server() {
-        let path1 = super::daemon_socket_path(123).unwrap();
-        let path2 = super::daemon_socket_path(456).unwrap();
+        let path1 = super::daemon_socket_path("123").unwrap();
+        let path2 = super::daemon_socket_path("456").unwrap();
         assert_ne!(path1, path2);
         assert!(path1.to_string_lossy().contains("123"));
         assert!(path2.to_string_lossy().contains("456"));

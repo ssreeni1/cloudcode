@@ -8,7 +8,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use crate::config::{
-    AiProvider, AuthMethod, ClaudeConfig, CodexConfig, Config, HetznerConfig, TelegramConfig,
+    AiProvider, AiProviderConfig, AuthMethod, ClaudeConfig, CloudKind, CodexConfig, Config,
+    HetznerConfig, TelegramConfig,
 };
 use crate::hetzner::client::{HetznerClient, ServerTypeInfo};
 use crate::state::VpsState;
@@ -76,6 +77,7 @@ pub enum SlashCommand {
     Ssh(Vec<String>),
     Init,
     Help,
+    Health,
     Quit,
 }
 
@@ -128,7 +130,7 @@ impl SlashCommand {
             Self::Down => vec!["down".into()],
             Self::Open(s) => vec!["open".into(), s.clone()],
             // Internal
-            Self::Init | Self::Help | Self::Quit => vec![],
+            Self::Init | Self::Help | Self::Health | Self::Quit => vec![],
         }
     }
 
@@ -152,6 +154,7 @@ impl SlashCommand {
             Self::Ssh(args) => format!("/ssh {}", args.join(" ")),
             Self::Init => "/init".into(),
             Self::Help => "/help".into(),
+            Self::Health => "/health".into(),
             Self::Quit => "/quit".into(),
         }
     }
@@ -206,6 +209,7 @@ pub fn parse_slash_command(input: &str) -> ParseResult {
             ParseResult::Ok(SlashCommand::Ssh(args))
         }
         "init" | "setup" => ParseResult::Ok(SlashCommand::Init),
+        "health" => ParseResult::Ok(SlashCommand::Health),
         "help" | "h" | "?" => ParseResult::Ok(SlashCommand::Help),
         "quit" | "q" | "exit" => ParseResult::Ok(SlashCommand::Quit),
         other => ParseResult::Unknown(other.to_string()),
@@ -223,12 +227,16 @@ pub struct App {
     pub existing_config: bool,
     pub vps_state: VpsState,
 
-    // Hetzner
+    // Cloud provider
+    pub cloud_kind: Option<CloudKind>,
+    pub cloud_choice: usize, // 0=Hetzner, 1=DigitalOcean
+
+    // Cloud token
     pub hetzner_input: Input,
     pub hetzner_status: ValidationStatus,
 
-    // Provider
-    pub provider_choice: usize, // 0=Claude, 1=Codex, 2=Both
+    // AI Provider
+    pub provider_choice: usize, // index into AiProvider::ALL selections
     pub wants_claude: bool,
     pub wants_codex: bool,
 
@@ -274,6 +282,7 @@ pub struct App {
     pub running_command: Option<String>,
     pub command_done: bool,
     pub show_help: bool,
+    pub show_health: bool,
     pub log_scroll: usize,
     /// History of completed commands and their output.
     pub history: Vec<HistoryEntry>,
@@ -286,6 +295,17 @@ pub struct App {
     pub spinner_tick: usize,
     /// Timestamp of last Ctrl+C press (for double-press to quit).
     pub last_ctrl_c: Option<std::time::Instant>,
+    /// Cached health dashboard results, refreshed only when /health is invoked.
+    pub health_cache: Option<Vec<ProviderHealthStatus>>,
+}
+
+/// Cached health status for a single provider (used by health dashboard).
+pub struct ProviderHealthStatus {
+    pub display_name: &'static str,
+    pub is_stable: bool,
+    pub installed: bool,
+    pub authed: bool,
+    pub ready: bool,
 }
 
 impl App {
@@ -311,6 +331,9 @@ impl App {
             config,
             existing_config,
             vps_state,
+
+            cloud_kind: None,
+            cloud_choice: 0,
 
             hetzner_input: Input::default(),
             hetzner_status: ValidationStatus::Idle,
@@ -350,6 +373,7 @@ impl App {
             running_command: None,
             command_done: false,
             show_help: true,
+            show_health: false,
             log_scroll: 0,
             history: Vec::new(),
             server_type_picker: None,
@@ -358,6 +382,7 @@ impl App {
             should_quit: false,
             spinner_tick: 0,
             last_ctrl_c: None,
+            health_cache: None,
         })
     }
 
@@ -438,7 +463,8 @@ impl App {
     fn handle_wizard_key(&mut self, key: KeyEvent) {
         match self.step {
             WizardStep::Welcome => self.handle_welcome_key(key),
-            WizardStep::Hetzner => self.handle_hetzner_key(key),
+            WizardStep::CloudProvider => self.handle_cloud_provider_key(key),
+            WizardStep::CloudToken => self.handle_hetzner_key(key),
             WizardStep::Provider => self.handle_provider_key(key),
             WizardStep::Claude => self.handle_claude_key(key),
             WizardStep::ClaudeApiKey => self.handle_api_key_key(key),
@@ -464,8 +490,21 @@ impl App {
 
     fn handle_welcome_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Enter => self.step = WizardStep::Hetzner,
+            KeyCode::Enter => self.step = WizardStep::CloudProvider,
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            _ => {}
+        }
+    }
+
+    fn handle_cloud_provider_key(&mut self, key: KeyEvent) {
+        // Only Hetzner is available for now (DigitalOcean coming soon)
+        match key.code {
+            KeyCode::Enter => {
+                self.cloud_choice = 0;
+                self.cloud_kind = Some(CloudKind::Hetzner);
+                self.step = WizardStep::CloudToken;
+            }
+            KeyCode::Esc => self.step = WizardStep::Welcome,
             _ => {}
         }
     }
@@ -489,7 +528,7 @@ impl App {
                     });
                 }
             }
-            KeyCode::Esc => self.step = WizardStep::Welcome,
+            KeyCode::Esc => self.step = WizardStep::CloudProvider,
             _ => {
                 if self.hetzner_status != ValidationStatus::Validating {
                     self.hetzner_input
@@ -503,6 +542,9 @@ impl App {
     }
 
     fn handle_provider_key(&mut self, key: KeyEvent) {
+        // Options: Claude, Codex, Amp (beta), OpenCode (beta), Pi (beta), Cursor (beta), Both (Claude+Codex)
+        const NUM_PROVIDER_OPTIONS: usize = 7;
+
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.provider_choice > 0 {
@@ -510,7 +552,7 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.provider_choice < 2 {
+                if self.provider_choice < NUM_PROVIDER_OPTIONS - 1 {
                     self.provider_choice += 1;
                 }
             }
@@ -531,7 +573,51 @@ impl App {
                         self.step = WizardStep::Codex;
                     }
                     2 => {
-                        // Both
+                        // Amp (beta) — skip auth step for now, go to Telegram
+                        self.wants_claude = false;
+                        self.wants_codex = false;
+                        self.config.default_provider = Some(AiProvider::Amp);
+                        self.config.amp = Some(AiProviderConfig {
+                            auth_method: AuthMethod::Oauth,
+                            api_key: None,
+                        });
+                        self.step = WizardStep::Telegram;
+                    }
+                    3 => {
+                        // OpenCode (beta)
+                        self.wants_claude = false;
+                        self.wants_codex = false;
+                        self.config.default_provider = Some(AiProvider::OpenCode);
+                        self.config.opencode = Some(AiProviderConfig {
+                            auth_method: AuthMethod::Oauth,
+                            api_key: None,
+                        });
+                        self.step = WizardStep::Telegram;
+                    }
+                    4 => {
+                        // Pi (beta)
+                        self.wants_claude = false;
+                        self.wants_codex = false;
+                        self.config.default_provider = Some(AiProvider::Pi);
+                        self.config.pi = Some(AiProviderConfig {
+                            auth_method: AuthMethod::Oauth,
+                            api_key: None,
+                        });
+                        self.step = WizardStep::Telegram;
+                    }
+                    5 => {
+                        // Cursor (beta)
+                        self.wants_claude = false;
+                        self.wants_codex = false;
+                        self.config.default_provider = Some(AiProvider::Cursor);
+                        self.config.cursor = Some(AiProviderConfig {
+                            auth_method: AuthMethod::Oauth,
+                            api_key: None,
+                        });
+                        self.step = WizardStep::Telegram;
+                    }
+                    6 => {
+                        // Both (Claude + Codex)
                         self.wants_claude = true;
                         self.wants_codex = true;
                         self.config.default_provider = Some(AiProvider::Claude);
@@ -540,7 +626,7 @@ impl App {
                     _ => unreachable!(),
                 }
             }
-            KeyCode::Esc => self.step = WizardStep::Hetzner,
+            KeyCode::Esc => self.step = WizardStep::CloudToken,
             _ => {}
         }
     }
@@ -1013,7 +1099,15 @@ impl App {
                     ParseResult::Ok(SlashCommand::Help) => {
                         self.flush_to_history();
                         self.show_help = true;
+                        self.show_health = false;
                         self.error_message = None;
+                    }
+                    ParseResult::Ok(SlashCommand::Health) => {
+                        self.flush_to_history();
+                        self.show_health = true;
+                        self.show_help = false;
+                        self.error_message = None;
+                        self.refresh_health_cache();
                     }
                     ParseResult::Ok(SlashCommand::Init) => {
                         if self.vps_state.is_provisioned() {
@@ -1227,6 +1321,37 @@ impl App {
         }
     }
 
+    /// Recompute the health dashboard cache (calls `which` etc. once per /health).
+    pub fn refresh_health_cache(&mut self) {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let mut statuses = Vec::new();
+        for &provider in AiProvider::ALL {
+            let meta = provider.meta();
+
+            let installed = ProcessCommand::new("which")
+                .arg(meta.binary)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            let has_auth_file = meta
+                .auth_files
+                .iter()
+                .any(|f| std::path::Path::new(&format!("{}/{}", home, f)).exists());
+            let has_auth_env = meta.auth_env_vars.iter().any(|v| std::env::var(v).is_ok());
+            let authed = has_auth_file || has_auth_env;
+
+            statuses.push(ProviderHealthStatus {
+                display_name: meta.display_name,
+                is_stable: meta.stable,
+                installed,
+                authed,
+                ready: installed && authed,
+            });
+        }
+        self.health_cache = Some(statuses);
+    }
+
     pub fn is_oauth(&self) -> bool {
         self.config
             .claude
@@ -1328,6 +1453,14 @@ mod tests {
         assert!(matches!(
             parse_slash_command("kill"),
             ParseResult::MissingArg(_)
+        ));
+    }
+
+    #[test]
+    fn parse_health_command() {
+        assert!(matches!(
+            parse_slash_command("health"),
+            ParseResult::Ok(SlashCommand::Health)
         ));
     }
 }

@@ -5,23 +5,21 @@ use std::fs;
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use crate::config::{AuthMethod, Config};
-use crate::hetzner::client::HetznerClient;
+use crate::config::{AuthMethod, CloudKind, Config};
 use crate::hetzner::provisioner;
+use crate::providers::{self, CloudProviderKind, CreateServerOpts};
 use crate::ssh::connection::wait_for_ssh;
 use crate::ssh::health::{self, CloudInitStatus};
 use crate::state::{VpsState, VpsStatus};
 
-use super::{
-    get_daemon_binary, install_daemon, target_triple_for_server_type, upload_binary, verify_daemon,
-};
+use super::{get_daemon_binary, install_daemon, upload_binary, verify_daemon};
 
 const TOTAL_STEPS: u8 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentStage {
     GenerateCloudInit,
-    CreateHetznerKey,
+    CreateCloudKey,
     ProvisionServer,
     WaitForSsh,
     WaitForCloudInit,
@@ -36,7 +34,7 @@ impl DeploymentStage {
     fn number(self) -> u8 {
         match self {
             Self::GenerateCloudInit => 1,
-            Self::CreateHetznerKey => 2,
+            Self::CreateCloudKey => 2,
             Self::ProvisionServer => 3,
             Self::WaitForSsh => 4,
             Self::WaitForCloudInit => 5,
@@ -51,7 +49,7 @@ impl DeploymentStage {
     fn label(self, server_type: &str, location: &str, target: &str) -> String {
         match self {
             Self::GenerateCloudInit => "Generating cloud-init config...".to_string(),
-            Self::CreateHetznerKey => "Creating SSH key in Hetzner...".to_string(),
+            Self::CreateCloudKey => "Creating SSH key in cloud provider...".to_string(),
             Self::ProvisionServer => {
                 format!("Provisioning server ({server_type} in {location})...")
             }
@@ -72,7 +70,7 @@ impl DeploymentStage {
     fn success_message(self, server_type: &str, location: &str, target: &str) -> String {
         match self {
             Self::GenerateCloudInit => "Generated cloud-init config".to_string(),
-            Self::CreateHetznerKey => "Created SSH key in Hetzner".to_string(),
+            Self::CreateCloudKey => "Created SSH key in cloud provider".to_string(),
             Self::ProvisionServer => format!("Provisioned server ({server_type} in {location})"),
             Self::WaitForSsh => "SSH is reachable".to_string(),
             Self::WaitForCloudInit => "Cloud-init completed successfully".to_string(),
@@ -87,7 +85,7 @@ impl DeploymentStage {
     fn failure_message(self, server_type: &str, location: &str, target: &str) -> String {
         match self {
             Self::GenerateCloudInit => "Failed to generate cloud-init config".to_string(),
-            Self::CreateHetznerKey => "Failed to create SSH key in Hetzner".to_string(),
+            Self::CreateCloudKey => "Failed to create SSH key in cloud provider".to_string(),
             Self::ProvisionServer => {
                 format!("Failed to provision server ({server_type} in {location})")
             }
@@ -112,13 +110,13 @@ impl DeploymentPlan {
         let stages = if no_wait {
             vec![
                 DeploymentStage::GenerateCloudInit,
-                DeploymentStage::CreateHetznerKey,
+                DeploymentStage::CreateCloudKey,
                 DeploymentStage::ProvisionServer,
             ]
         } else {
             vec![
                 DeploymentStage::GenerateCloudInit,
-                DeploymentStage::CreateHetznerKey,
+                DeploymentStage::CreateCloudKey,
                 DeploymentStage::ProvisionServer,
                 DeploymentStage::WaitForSsh,
                 DeploymentStage::WaitForCloudInit,
@@ -238,6 +236,8 @@ impl ConsoleReporter {
 struct DeploymentContext {
     config: Config,
     state: VpsState,
+    cloud_kind: CloudKind,
+    cloud_provider: CloudProviderKind,
     server_type: String,
     location: String,
     image: String,
@@ -245,40 +245,70 @@ struct DeploymentContext {
 }
 
 impl DeploymentContext {
-    fn load(no_wait: bool, server_type_override: Option<String>) -> Result<Self> {
+    fn load(_no_wait: bool, server_type_override: Option<String>) -> Result<Self> {
         let config = Config::load()?;
         let state = VpsState::load()?;
 
         if state.is_provisioned() {
             bail!(
                 "VPS already provisioned (server ID: {}, IP: {}). Run /down or `cloudcode down` first.",
-                state.server_id.unwrap(),
+                state.server_id.as_deref().unwrap_or("?"),
                 state.server_ip.as_deref().unwrap_or("unknown")
             );
         }
 
-        let hetzner_config = config
-            .hetzner
-            .as_ref()
-            .context("Hetzner not configured. Run /init or `cloudcode init` first.")?;
+        let cloud_kind = config
+            .effective_cloud_kind()
+            .context("No cloud provider configured. Run /init or `cloudcode init` first.")?;
 
-        // At least one AI provider (Claude or Codex) must be configured
-        if config.claude.is_none() && config.codex.is_none() {
+        // Get the API token for the active cloud provider
+        let token = match cloud_kind {
+            CloudKind::Hetzner => config
+                .effective_hetzner()
+                .context("Hetzner token not configured. Run /init or `cloudcode init` first.")?
+                .api_token
+                .clone(),
+            CloudKind::DigitalOcean => config
+                .cloud
+                .as_ref()
+                .and_then(|c| c.digitalocean.as_ref())
+                .context("DigitalOcean token not configured. Run /init or `cloudcode init` first.")?
+                .api_token
+                .clone(),
+        };
+
+        let cloud_provider = providers::cloud_provider(&cloud_kind.to_string(), token)?;
+
+        // At least one AI provider must be configured
+        if config.claude.is_none()
+            && config.codex.is_none()
+            && config.amp.is_none()
+            && config.opencode.is_none()
+            && config.pi.is_none()
+            && config.cursor.is_none()
+        {
             anyhow::bail!(
-                "No AI provider configured. At least one of Claude or Codex must be set up. Run /init or `cloudcode init` first."
+                "No AI provider configured. At least one must be set up. Run /init or `cloudcode init` first."
             );
         }
-        let _ = (hetzner_config, no_wait);
 
         let vps_config = config.vps.as_ref();
+        let default_server_type = match cloud_kind {
+            CloudKind::Hetzner => "cx23",
+            CloudKind::DigitalOcean => "s-1vcpu-1gb",
+        };
+        let default_location = match cloud_kind {
+            CloudKind::Hetzner => "nbg1",
+            CloudKind::DigitalOcean => "nyc1",
+        };
         let server_type = server_type_override
             .as_deref()
             .or_else(|| vps_config.and_then(|v| v.server_type.as_deref()))
-            .unwrap_or("cx23")
+            .unwrap_or(default_server_type)
             .to_string();
         let location = vps_config
             .and_then(|v| v.location.as_deref())
-            .unwrap_or("nbg1")
+            .unwrap_or(default_location)
             .to_string();
         let image = vps_config
             .and_then(|v| v.image.as_deref())
@@ -288,6 +318,8 @@ impl DeploymentContext {
         Ok(Self {
             config,
             state,
+            cloud_kind,
+            cloud_provider,
             server_type,
             location,
             image,
@@ -322,7 +354,7 @@ impl DeploymentContext {
         println!("{}", "cloudcode up".bold().cyan());
 
         self.step_generate_cloud_init(&reporter).await?;
-        self.step_create_hetzner_key(&reporter, &ssh_pub_key_path)
+        self.step_create_cloud_key(&reporter, &ssh_pub_key_path)
             .await?;
         self.step_provision_server(&reporter, &ssh_pub_key_path)
             .await?;
@@ -353,18 +385,23 @@ impl DeploymentContext {
     }
 
     fn target(&self) -> &str {
-        target_triple_for_server_type(&self.server_type)
+        self.cloud_provider.target_triple(&self.server_type)
     }
 
     fn confirm_risk_if_needed(&self) -> Result<()> {
         use std::io::IsTerminal;
         if std::io::stdout().is_terminal() {
-            let cost_str = crate::hetzner::client::estimate_monthly_cost(&self.server_type)
-                .map(|c| format!("~${:.2}/mo", c))
-                .unwrap_or_else(|| "unknown cost".to_string());
+            let cost_str = match self.cloud_kind {
+                CloudKind::Hetzner => {
+                    crate::hetzner::client::estimate_monthly_cost(&self.server_type)
+                        .map(|c| format!("~${:.2}/mo", c))
+                        .unwrap_or_else(|| "unknown cost".to_string())
+                }
+                CloudKind::DigitalOcean => "unknown cost".to_string(),
+            };
             println!(
-                "This will provision a {} server at {} on Hetzner. Continue? [Y/n]",
-                self.server_type, cost_str
+                "This will provision a {} server at {} on {}. Continue? [Y/n]",
+                self.server_type, cost_str, self.cloud_kind
             );
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
@@ -405,7 +442,7 @@ impl DeploymentContext {
             .trim()
             .to_string();
         let cloud_init =
-            provisioner::generate_cloud_init(&ssh_pub_key, self.config.claude.as_ref());
+            provisioner::generate_cloud_init(&ssh_pub_key, &self.config);
         let _ = &cloud_init;
         reporter.finish(
             &pb,
@@ -417,32 +454,28 @@ impl DeploymentContext {
         Ok(())
     }
 
-    async fn step_create_hetzner_key(
+    async fn step_create_cloud_key(
         &mut self,
         reporter: &ConsoleReporter,
         ssh_pub_key_path: &std::path::Path,
     ) -> Result<()> {
         let pb = reporter.start(
-            DeploymentStage::CreateHetznerKey,
+            DeploymentStage::CreateCloudKey,
             &self.server_type,
             &self.location,
             self.target(),
         );
         let ssh_pub_key =
             fs::read_to_string(ssh_pub_key_path).context("Failed to read SSH public key")?;
-        let client = HetznerClient::new(
-            self.config
-                .hetzner
-                .as_ref()
-                .context("Hetzner not configured")?
-                .api_token
-                .clone(),
-        );
-        let ssh_key_id = match client.create_ssh_key("cloudcode", ssh_pub_key.trim()).await {
+        let ssh_key_id = match self
+            .cloud_provider
+            .create_ssh_key("cloudcode", ssh_pub_key.trim())
+            .await
+        {
             Ok(id) => {
                 reporter.finish(
                     &pb,
-                    DeploymentStage::CreateHetznerKey,
+                    DeploymentStage::CreateCloudKey,
                     &self.server_type,
                     &self.location,
                     self.target(),
@@ -452,12 +485,12 @@ impl DeploymentContext {
             Err(e) => {
                 reporter.fail(
                     &pb,
-                    DeploymentStage::CreateHetznerKey,
+                    DeploymentStage::CreateCloudKey,
                     &self.server_type,
                     &self.location,
                     self.target(),
                 );
-                return Err(e.context("Failed to register SSH key with Hetzner"));
+                return Err(e.context("Failed to register SSH key with cloud provider"));
             }
         };
         self.state = VpsState {
@@ -465,6 +498,9 @@ impl DeploymentContext {
             server_ip: None,
             ssh_key_id: Some(ssh_key_id),
             status: Some(VpsStatus::Creating),
+            cloud_provider: Some(self.cloud_kind.to_string()),
+            server_type: None,
+            location: None,
         };
         self.state.save()?;
         Ok(())
@@ -483,27 +519,24 @@ impl DeploymentContext {
         );
         let ssh_pub_key =
             fs::read_to_string(ssh_pub_key_path).context("Failed to read SSH public key")?;
-        let client = HetznerClient::new(
-            self.config
-                .hetzner
-                .as_ref()
-                .context("Hetzner not configured")?
-                .api_token
-                .clone(),
-        );
         let cloud_init =
-            provisioner::generate_cloud_init(&ssh_pub_key, self.config.claude.as_ref());
-        let (server_id, server_ip) = match client
-            .create_server(
-                "cloudcode",
-                &self.server_type,
-                &self.image,
-                &self.location,
-                vec![self.state.ssh_key_id.context("Missing SSH key id")?],
-                &cloud_init,
-            )
-            .await
-        {
+            provisioner::generate_cloud_init(&ssh_pub_key, &self.config);
+
+        let opts = CreateServerOpts {
+            name: "cloudcode".to_string(),
+            server_type: self.server_type.clone(),
+            image: self.image.clone(),
+            location: self.location.clone(),
+            ssh_key_ids: vec![self
+                .state
+                .ssh_key_id
+                .as_ref()
+                .context("Missing SSH key id")?
+                .clone()],
+            user_data: cloud_init,
+        };
+
+        let server = match self.cloud_provider.create_server(opts).await {
             Ok(result) => {
                 reporter.finish(
                     &pb,
@@ -528,12 +561,14 @@ impl DeploymentContext {
                 {
                     println!(
                         "\n{}",
-                        "Hetzner could not place that server type in the requested location right now."
-                            .yellow()
+                        format!(
+                            "{} could not place that server type in the requested location right now.",
+                            self.cloud_kind
+                        ).yellow()
                     );
                     println!(
                         "{}",
-                        "Try `cloudcode up --server-type cax11`, retry the same command in a few minutes, or switch the default location/server type in your config."
+                        "Retry the same command in a few minutes, or switch the server type/location in your config."
                             .yellow()
                     );
                 }
@@ -541,9 +576,12 @@ impl DeploymentContext {
             }
         };
 
-        self.state.server_id = Some(server_id);
-        self.state.server_ip = Some(server_ip.clone());
+        self.state.server_id = Some(server.id);
+        self.state.server_ip = Some(server.ip);
         self.state.status = Some(VpsStatus::Initializing);
+        self.state.cloud_provider = Some(self.cloud_kind.to_string());
+        self.state.server_type = Some(self.server_type.clone());
+        self.state.location = Some(self.location.clone());
         self.state.save()?;
         Ok(())
     }

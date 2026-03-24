@@ -18,6 +18,17 @@ pub enum DaemonRequest {
     GetDefaultSession,
     SetDefaultSession { session: Option<String> },
     Waiting,
+    ProviderHealth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderHealthInfo {
+    pub provider: String,
+    pub installed: bool,
+    pub version: Option<String>,
+    pub has_auth: bool,
+    pub ready: bool,
+    pub stable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +91,9 @@ pub enum DaemonResponse {
     },
     WaitingSessions {
         sessions: Vec<WaitingSession>,
+    },
+    ProviderHealth {
+        providers: Vec<ProviderHealthInfo>,
     },
     Error {
         message: String,

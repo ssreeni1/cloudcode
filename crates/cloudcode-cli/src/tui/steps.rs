@@ -2,7 +2,8 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WizardStep {
     Welcome,
-    Hetzner,
+    CloudProvider,
+    CloudToken,
     Provider,
     Claude,
     ClaudeApiKey,
@@ -18,19 +19,20 @@ pub enum WizardStep {
 impl WizardStep {
     /// The total number of visible steps (used for progress display).
     pub fn total_steps() -> usize {
-        5
+        6
     }
 
     /// The current step number (1-indexed) for the progress indicator.
     pub fn step_number(&self) -> Option<usize> {
         match self {
             Self::Welcome => None,
-            Self::Hetzner => Some(1),
-            Self::Provider => Some(2),
-            Self::Claude | Self::ClaudeApiKey | Self::OAuthWarning => Some(3),
-            Self::Codex | Self::CodexApiKey | Self::CodexOAuthWarning => Some(3),
-            Self::Telegram => Some(4),
-            Self::Generating => Some(5),
+            Self::CloudProvider => Some(1),
+            Self::CloudToken => Some(2),
+            Self::Provider => Some(3),
+            Self::Claude | Self::ClaudeApiKey | Self::OAuthWarning => Some(4),
+            Self::Codex | Self::CodexApiKey | Self::CodexOAuthWarning => Some(4),
+            Self::Telegram => Some(5),
+            Self::Generating => Some(6),
             Self::Complete => None,
         }
     }
@@ -39,7 +41,8 @@ impl WizardStep {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Welcome => "Welcome",
-            Self::Hetzner => "Hetzner Cloud",
+            Self::CloudProvider => "Cloud Provider",
+            Self::CloudToken => "Cloud API Token",
             Self::Provider => "AI Provider",
             Self::Claude => "Claude Authentication",
             Self::ClaudeApiKey => "Claude API Key",

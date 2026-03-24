@@ -187,6 +187,12 @@ pub async fn handle_with_state(
                 .unwrap_or_default();
             DaemonResponse::WaitingSessions { sessions }
         }
+        DaemonRequest::ProviderHealth => {
+            // TODO(step-22): iterate all providers, check installed/version/auth/ready
+            DaemonResponse::ProviderHealth {
+                providers: vec![],
+            }
+        }
     }
 }
 
