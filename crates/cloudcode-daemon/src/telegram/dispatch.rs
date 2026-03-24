@@ -260,10 +260,12 @@ pub async fn list_logic(state: &DaemonState) -> DispatchResult {
                     } else {
                         ""
                     };
+                    let provider = state.session_mgr.session_provider_name(&session.name);
                     text.push_str(&format!(
-                        "• {} [{}]{}\n",
+                        "• {} [{}] ({}){}\n",
                         session.name,
                         format!("{:?}", session.state),
+                        provider,
                         marker
                     ));
                 }

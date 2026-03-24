@@ -371,6 +371,11 @@ impl SessionManager {
         let _ = std::fs::write(&path, provider.as_str());
     }
 
+    /// Get the provider name for a specific session (for display).
+    pub fn session_provider_name(&self, session: &str) -> &'static str {
+        self.session_provider(session).display_name()
+    }
+
     /// Get the provider for a specific session (reads per-session file, falls back to default).
     fn session_provider(&self, session: &str) -> AiProvider {
         let path = daemon_home_dir()

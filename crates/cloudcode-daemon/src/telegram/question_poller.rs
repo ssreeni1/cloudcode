@@ -310,11 +310,47 @@ pub async fn run_poller(
                 // Content is changing — count consecutive changes
                 stream_entry.2 = stream_entry.2.saturating_add(1);
 
+                // Check if the pane looks like startup/idle (not real work)
+                let is_startup_or_idle = {
+                    let recent: Vec<&str> = content
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .rev()
+                        .take(5)
+                        .collect();
+                    // If the last meaningful lines are just the idle prompt/status bar,
+                    // this is startup or idle — not real AI work
+                    recent.iter().all(|line| {
+                        let t = line.trim();
+                        t == "❯" || t == "❯ " || t == "›"
+                            || t.contains("bypass permissions")
+                            || t.contains("shift+tab to cycle")
+                            || t.contains("% left ·")
+                            || t.contains("gpt-5.4")
+                            || t.starts_with("───")
+                            || t.starts_with("━━━")
+                            || t.contains("Claude Code v")
+                            || t.contains("Opus 4")
+                            || t.contains("Claude Max")
+                            || t.contains("Voice mode")
+                            || t.starts_with("▐▛") || t.starts_with("▝▜") || t.starts_with("▘▘")
+                            || t.contains("cloudcode/sessions/")
+                            || t.contains("medium · /effort")
+                            || t.contains("npm to native")
+                            || t.contains("claude install")
+                            || t.contains("OpenAI Codex")
+                            || t.starts_with("╭") || t.starts_with("│") || t.starts_with("╰")
+                            || t.starts_with("Tip:")
+                            || t.starts_with("› ")
+                    })
+                };
+
                 if stream_entry.0 == 0
                     && stream_entry.2 >= 3
+                    && !is_startup_or_idle
                     && prev_content.contains_key(&session.name)
                 {
-                    // 3+ consecutive changes = sustained AI activity, send "Working..."
+                    // Sustained AI activity (not startup) — send "Working..."
                     let msg_id = sender
                         .send_html_returning_id(
                             owner_id,
@@ -388,6 +424,8 @@ pub async fn run_poller(
                         || t == "❯ "
                         || t.contains("bypass permissions")
                         || t.contains("shift+tab to cycle")
+                        || t.contains("npm to native")
+                        || t.contains("claude install")
                         // Codex idle indicators
                         || t == "›"
                         || t.starts_with("› ")
