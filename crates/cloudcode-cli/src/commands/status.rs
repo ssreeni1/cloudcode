@@ -166,12 +166,10 @@ pub async fn run() -> Result<()> {
                     }
                 );
                 for s in &sessions {
-                    let provider = s.provider.as_deref().unwrap_or("unknown");
                     println!(
-                        "    {} [{}] ({})",
+                        "    {} [{}]",
                         s.name.green(),
-                        format!("{:?}", s.state).yellow(),
-                        provider.dimmed()
+                        format!("{:?}", s.state).yellow()
                     );
                 }
                 if let Some(tg) = telegram {

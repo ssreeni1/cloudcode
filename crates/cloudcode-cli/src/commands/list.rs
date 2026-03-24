@@ -23,10 +23,12 @@ pub async fn run() -> Result<()> {
             } else {
                 println!("{}", "Active sessions:".bold());
                 for s in &sessions {
+                    let provider = s.provider.as_deref().unwrap_or("unknown");
                     println!(
-                        "  {} [{}]",
+                        "  {} [{}] ({})",
                         s.name.green(),
-                        format!("{:?}", s.state).yellow()
+                        format!("{:?}", s.state).yellow(),
+                        provider.dimmed()
                     );
                 }
             }
