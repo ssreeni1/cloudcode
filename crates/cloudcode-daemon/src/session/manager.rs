@@ -273,6 +273,7 @@ fn session_snapshot_dirs_from_workdir(workdir: &Path, session_tmp: Option<&Path>
 
 /// Check if a Codex tmux session is ready for input.
 /// Returns false if the session is in an auth flow or restarting.
+#[allow(dead_code)]
 fn is_codex_ready(pane_content: &str) -> bool {
     let lines: Vec<&str> = pane_content
         .lines()
@@ -307,6 +308,7 @@ fn is_codex_ready(pane_content: &str) -> bool {
 
 /// Extract the AI's response by diffing pane content before and after a send.
 /// Strips the echoed input line and prompt lines.
+#[allow(dead_code)]
 fn extract_response(pane_before: &str, pane_after: &str) -> String {
     let before_lines: Vec<&str> = pane_before.lines().collect();
     let after_lines: Vec<&str> = pane_after.lines().collect();
@@ -863,6 +865,7 @@ impl SessionManager {
     /// Polls capture_pane_full every 2 seconds. Returns the new output
     /// (diff between pane_before and current pane) when stable.
     /// Also detects if Claude/Codex is asking a question.
+    #[allow(dead_code)]
     async fn wait_for_output(&self, session: &str, pane_before: &str) -> Result<String> {
         use crate::telegram::question_poller::detect_question;
 
@@ -904,6 +907,7 @@ impl SessionManager {
     /// Send a message through the tmux session (for Codex only).
     /// Types the message into tmux, waits for output to stabilize,
     /// captures the response and detects new files.
+    #[allow(dead_code)]
     pub async fn send_via_tmux(&self, session: &str, message: &str) -> Result<SendOutput> {
         validate_session_name(session)?;
         if !self.session_exists(session).await {

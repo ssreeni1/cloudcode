@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
 use colored::Colorize;
 

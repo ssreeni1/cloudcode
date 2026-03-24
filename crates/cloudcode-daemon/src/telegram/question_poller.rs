@@ -36,6 +36,7 @@ pub fn new_question_states() -> QuestionStates {
 
 /// Per-session activity state for completion detection
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum ActivityState {
     Idle,
     Active {
