@@ -59,9 +59,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
 "#,
         );
         curl_status_inits.push_str(
-            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/opencode-status.json\n\
-      chown claude:claude /home/claude/.cloudcode/opencode-status.json\n\
-      chmod 0600 /home/claude/.cloudcode/opencode-status.json\n",
+            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/opencode-status.json\n      chown claude:claude /home/claude/.cloudcode/opencode-status.json\n      chmod 0600 /home/claude/.cloudcode/opencode-status.json\n",
         );
         curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-opencode-setup.sh >/dev/null 2>&1 &\n");
@@ -96,9 +94,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
 "#,
         );
         curl_status_inits.push_str(
-            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/cursor-status.json\n\
-      chown claude:claude /home/claude/.cloudcode/cursor-status.json\n\
-      chmod 0600 /home/claude/.cloudcode/cursor-status.json\n",
+            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/cursor-status.json\n      chown claude:claude /home/claude/.cloudcode/cursor-status.json\n      chmod 0600 /home/claude/.cloudcode/cursor-status.json\n",
         );
         curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-cursor-setup.sh >/dev/null 2>&1 &\n");
@@ -108,9 +104,7 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
     let mut npm_status_inits = String::new();
     for name in &npm_status_names {
         npm_status_inits.push_str(&format!(
-            "      echo '{{\"status\":\"pending\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
-      chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
-      chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+            "      echo '{{\"status\":\"pending\"}}' > /home/claude/.cloudcode/{name}-status.json\n      chown claude:claude /home/claude/.cloudcode/{name}-status.json\n      chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
         ));
     }
 
@@ -118,18 +112,14 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
     let mut npm_status_ready_lines = String::new();
     for name in &npm_status_names {
         npm_status_ready_lines.push_str(&format!(
-            "        echo '{{\"status\":\"ready\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
-             \x20       chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
-             \x20       chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+            "          echo '{{\"status\":\"ready\"}}' > /home/claude/.cloudcode/{name}-status.json\n          chown claude:claude /home/claude/.cloudcode/{name}-status.json\n          chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
         ));
     }
 
     let mut npm_status_failed_lines = String::new();
     for name in &npm_status_names {
         npm_status_failed_lines.push_str(&format!(
-            "      echo '{{\"status\":\"failed\",\"error\":\"{name} CLI install failed (npm batch install failed after 2 attempts). Check /var/log/cloudcode-npm-providers.log\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
-             \x20   chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
-             \x20   chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+            "      echo '{{\"status\":\"failed\",\"error\":\"{name} CLI install failed (npm batch install failed after 2 attempts). Check /var/log/cloudcode-npm-providers.log\"}}' > /home/claude/.cloudcode/{name}-status.json\n      chown claude:claude /home/claude/.cloudcode/{name}-status.json\n      chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
         ));
     }
 
@@ -451,6 +441,66 @@ mod tests {
         let nodesource_pos = output.find("nodesource.com/setup_22.x").unwrap();
         assert!(nodesource_pos > setup_script_start,
             "NodeSource install should be inside the setup script");
+    }
+
+    #[test]
+    fn cloud_init_yaml_indentation_is_consistent() {
+        // Regression test: inside `content: |` blocks, shell command lines
+        // (echo, chown, chmod, etc.) must maintain >= the block's base indent.
+        // Lines that drop below cause YAML to end the block prematurely.
+        let mut config = dummy_config();
+        config.amp = Some(AiProviderConfig { auth_method: AuthMethod::ApiKey, api_key: Some("k".into()) });
+        config.opencode = Some(AiProviderConfig { auth_method: AuthMethod::ApiKey, api_key: Some("k".into()) });
+        config.pi = Some(AiProviderConfig { auth_method: AuthMethod::ApiKey, api_key: Some("k".into()) });
+        config.cursor = Some(AiProviderConfig { auth_method: AuthMethod::ApiKey, api_key: Some("k".into()) });
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
+
+        let mut in_content_block = false;
+        let mut block_indent: Option<usize> = None;
+        let mut content_line_num = 0usize;
+        for (line_num, line) in output.lines().enumerate() {
+            if line.trim_end().ends_with("content: |") {
+                in_content_block = true;
+                block_indent = None;
+                content_line_num = line_num;
+                continue;
+            }
+            if in_content_block {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let indent = line.len() - line.trim_start().len();
+                if let Some(base) = block_indent {
+                    if indent < base {
+                        // Block ended — this line is back at YAML level
+                        in_content_block = false;
+                        // But verify the line IS a valid YAML construct, not a
+                        // shell command that accidentally broke out
+                        let trimmed = line.trim();
+                        let is_shell_cmd = trimmed.starts_with("echo ")
+                            || trimmed.starts_with("chown ")
+                            || trimmed.starts_with("chmod ")
+                            || trimmed.starts_with("for ")
+                            || trimmed.starts_with("if ")
+                            || trimmed.starts_with("fi")
+                            || trimmed.starts_with("done")
+                            || trimmed.starts_with("exit ")
+                            || trimmed.starts_with("sleep ")
+                            || trimmed.starts_with("nohup ");
+                        if is_shell_cmd {
+                            panic!(
+                                "Cloud-init YAML: shell command escaped content: | block!\n\
+                                 Line {}: {:?} (indent {}, block base {})\n\
+                                 Block started at line {}",
+                                line_num + 1, line, indent, base, content_line_num + 1
+                            );
+                        }
+                    }
+                } else {
+                    block_indent = Some(indent);
+                }
+            }
+        }
     }
 }
 
