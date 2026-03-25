@@ -60,8 +60,8 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
         );
         curl_status_inits.push_str(
             "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/opencode-status.json\n\
-             \x20     chown claude:claude /home/claude/.cloudcode/opencode-status.json\n\
-             \x20     chmod 0600 /home/claude/.cloudcode/opencode-status.json\n",
+      chown claude:claude /home/claude/.cloudcode/opencode-status.json\n\
+      chmod 0600 /home/claude/.cloudcode/opencode-status.json\n",
         );
         curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-opencode-setup.sh >/dev/null 2>&1 &\n");
@@ -97,8 +97,8 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
         );
         curl_status_inits.push_str(
             "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/cursor-status.json\n\
-             \x20     chown claude:claude /home/claude/.cloudcode/cursor-status.json\n\
-             \x20     chmod 0600 /home/claude/.cloudcode/cursor-status.json\n",
+      chown claude:claude /home/claude/.cloudcode/cursor-status.json\n\
+      chmod 0600 /home/claude/.cloudcode/cursor-status.json\n",
         );
         curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-cursor-setup.sh >/dev/null 2>&1 &\n");
@@ -109,8 +109,8 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
     for name in &npm_status_names {
         npm_status_inits.push_str(&format!(
             "      echo '{{\"status\":\"pending\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
-             \x20     chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
-             \x20     chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+      chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
+      chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
         ));
     }
 
