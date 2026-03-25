@@ -5,186 +5,132 @@ use crate::hetzner::client::HetznerClient;
 use crate::state::VpsState;
 
 pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
-    // Build write_files entries for provider-specific install scripts
-    let mut extra_write_files = String::new();
-    // Build extra nohup launches and status file inits
-    let mut extra_status_inits = String::new();
-    let mut extra_nohup_launches = String::new();
+    // Build the list of npm packages to batch-install in a single background call.
+    // Claude Code is installed separately (synchronous, critical path).
+    let mut npm_packages = Vec::new();
+    let mut npm_status_names = Vec::new(); // provider names that get status files from npm install
+
+    // Codex is always installed as a background provider
+    npm_packages.push("@openai/codex".to_string());
+    npm_status_names.push("codex");
 
     if config.amp.is_some() {
-        extra_write_files.push_str(
-            r#"  - path: /opt/cloudcode-amp-setup.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      exec > /var/log/cloudcode-amp.log 2>&1
-      set -euo pipefail
-
-      STATUS_FILE=/home/claude/.cloudcode/amp-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
-      echo '{"status":"installing"}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
-        echo "Amp install attempt $attempt..."
-        if timeout 15m npm install -g @sourcegraph/amp && command -v amp >/dev/null 2>&1; then
-          echo '{"status":"ready"}' > "$STATUS_FILE"
-          chown claude:claude "$STATUS_FILE"
-          chmod 0600 "$STATUS_FILE"
-          exit 0
-        fi
-        echo "Amp attempt $attempt failed, waiting 15s..."
-        sleep 15
-      done
-
-      echo '{"status":"failed","error":"Amp CLI install failed after 3 attempts. Check /var/log/cloudcode-amp.log"}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-"#,
-        );
-        extra_status_inits.push_str(
-            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/amp-status.json\n\
-             \x20     chown claude:claude /home/claude/.cloudcode/amp-status.json\n\
-             \x20     chmod 0600 /home/claude/.cloudcode/amp-status.json\n",
-        );
-        extra_nohup_launches
-            .push_str("      nohup /opt/cloudcode-amp-setup.sh >/dev/null 2>&1 &\n");
+        npm_packages.push("@sourcegraph/amp".to_string());
+        npm_status_names.push("amp");
+    }
+    if config.pi.is_some() {
+        npm_packages.push("@mariozechner/pi-coding-agent".to_string());
+        npm_status_names.push("pi");
     }
 
+    let npm_packages_str = npm_packages.join(" ");
+
+    // Build curl-based installer background jobs (these can't be batched with npm)
+    let mut curl_write_files = String::new();
+    let mut curl_status_inits = String::new();
+    let mut curl_nohup_launches = String::new();
+
     if config.opencode.is_some() {
-        extra_write_files.push_str(
+        curl_write_files.push_str(
             r#"  - path: /opt/cloudcode-opencode-setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       exec > /var/log/cloudcode-opencode.log 2>&1
       set -euo pipefail
-
       STATUS_FILE=/home/claude/.cloudcode/opencode-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
       echo '{"status":"installing"}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
+      for attempt in 1 2; do
         echo "OpenCode install attempt $attempt..."
-        if timeout 15m bash -c 'export HOME=/home/claude && curl -fsSL https://opencode.ai/install | bash' && command -v opencode >/dev/null 2>&1; then
+        if timeout 10m bash -c 'export HOME=/home/claude && curl -fsSL https://opencode.ai/install | bash' && command -v opencode >/dev/null 2>&1; then
           echo '{"status":"ready"}' > "$STATUS_FILE"
           chown claude:claude "$STATUS_FILE"
           chmod 0600 "$STATUS_FILE"
           exit 0
         fi
-        echo "OpenCode attempt $attempt failed, waiting 15s..."
-        sleep 15
+        echo "OpenCode attempt $attempt failed, waiting 5s..."
+        sleep 5
       done
-
-      echo '{"status":"failed","error":"OpenCode install failed after 3 attempts. Check /var/log/cloudcode-opencode.log"}' > "$STATUS_FILE"
+      echo '{"status":"failed","error":"OpenCode install failed after 2 attempts. Check /var/log/cloudcode-opencode.log"}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
 "#,
         );
-        extra_status_inits.push_str(
+        curl_status_inits.push_str(
             "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/opencode-status.json\n\
              \x20     chown claude:claude /home/claude/.cloudcode/opencode-status.json\n\
              \x20     chmod 0600 /home/claude/.cloudcode/opencode-status.json\n",
         );
-        extra_nohup_launches
+        curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-opencode-setup.sh >/dev/null 2>&1 &\n");
     }
 
-    if config.pi.is_some() {
-        extra_write_files.push_str(
-            r#"  - path: /opt/cloudcode-pi-setup.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      exec > /var/log/cloudcode-pi.log 2>&1
-      set -euo pipefail
-
-      STATUS_FILE=/home/claude/.cloudcode/pi-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
-      echo '{"status":"installing"}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
-        echo "Pi install attempt $attempt..."
-        if timeout 15m npm install -g @mariozechner/pi-coding-agent && command -v pi >/dev/null 2>&1; then
-          echo '{"status":"ready"}' > "$STATUS_FILE"
-          chown claude:claude "$STATUS_FILE"
-          chmod 0600 "$STATUS_FILE"
-          exit 0
-        fi
-        echo "Pi attempt $attempt failed, waiting 15s..."
-        sleep 15
-      done
-
-      echo '{"status":"failed","error":"Pi CLI install failed after 3 attempts. Check /var/log/cloudcode-pi.log"}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-"#,
-        );
-        extra_status_inits.push_str(
-            "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/pi-status.json\n\
-             \x20     chown claude:claude /home/claude/.cloudcode/pi-status.json\n\
-             \x20     chmod 0600 /home/claude/.cloudcode/pi-status.json\n",
-        );
-        extra_nohup_launches
-            .push_str("      nohup /opt/cloudcode-pi-setup.sh >/dev/null 2>&1 &\n");
-    }
-
     if config.cursor.is_some() {
-        extra_write_files.push_str(
+        curl_write_files.push_str(
             r#"  - path: /opt/cloudcode-cursor-setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
       exec > /var/log/cloudcode-cursor.log 2>&1
       set -euo pipefail
-
       STATUS_FILE=/home/claude/.cloudcode/cursor-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
       echo '{"status":"installing"}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
+      for attempt in 1 2; do
         echo "Cursor install attempt $attempt..."
-        if timeout 15m bash -c 'export HOME=/home/claude && curl https://cursor.com/install -fsSL | bash' && (command -v cursor-agent >/dev/null 2>&1 || test -x /home/claude/.local/bin/cursor-agent); then
+        if timeout 10m bash -c 'export HOME=/home/claude && curl https://cursor.com/install -fsSL | bash' && (command -v cursor-agent >/dev/null 2>&1 || test -x /home/claude/.local/bin/cursor-agent); then
           echo '{"status":"ready"}' > "$STATUS_FILE"
           chown claude:claude "$STATUS_FILE"
           chmod 0600 "$STATUS_FILE"
           exit 0
         fi
-        echo "Cursor attempt $attempt failed, waiting 15s..."
-        sleep 15
+        echo "Cursor attempt $attempt failed, waiting 5s..."
+        sleep 5
       done
-
-      echo '{"status":"failed","error":"Cursor CLI install failed after 3 attempts. Check /var/log/cloudcode-cursor.log"}' > "$STATUS_FILE"
+      echo '{"status":"failed","error":"Cursor CLI install failed after 2 attempts. Check /var/log/cloudcode-cursor.log"}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
 "#,
         );
-        extra_status_inits.push_str(
+        curl_status_inits.push_str(
             "      echo '{\"status\":\"pending\"}' > /home/claude/.cloudcode/cursor-status.json\n\
              \x20     chown claude:claude /home/claude/.cloudcode/cursor-status.json\n\
              \x20     chmod 0600 /home/claude/.cloudcode/cursor-status.json\n",
         );
-        extra_nohup_launches
+        curl_nohup_launches
             .push_str("      nohup /opt/cloudcode-cursor-setup.sh >/dev/null 2>&1 &\n");
+    }
+
+    // Build status init lines for npm-installed providers
+    let mut npm_status_inits = String::new();
+    for name in &npm_status_names {
+        npm_status_inits.push_str(&format!(
+            "      echo '{{\"status\":\"pending\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
+             \x20     chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
+             \x20     chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+        ));
+    }
+
+    // Build the npm status update lines (mark each provider ready after single npm install succeeds)
+    let mut npm_status_ready_lines = String::new();
+    for name in &npm_status_names {
+        npm_status_ready_lines.push_str(&format!(
+            "        echo '{{\"status\":\"ready\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
+             \x20       chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
+             \x20       chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+        ));
+    }
+
+    let mut npm_status_failed_lines = String::new();
+    for name in &npm_status_names {
+        npm_status_failed_lines.push_str(&format!(
+            "      echo '{{\"status\":\"failed\",\"error\":\"{name} CLI install failed (npm batch install failed after 2 attempts). Check /var/log/cloudcode-npm-providers.log\"}}' > /home/claude/.cloudcode/{name}-status.json\n\
+             \x20   chown claude:claude /home/claude/.cloudcode/{name}-status.json\n\
+             \x20   chmod 0600 /home/claude/.cloudcode/{name}-status.json\n"
+        ));
     }
 
     format!(
@@ -206,13 +152,8 @@ packages:
   - ca-certificates
   - gnupg
 
-runcmd:
-  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  - apt-get install -y nodejs
-
 write_files:
   - path: /home/claude/.tmux.conf
-    owner: claude:claude
     permissions: '0644'
     content: |
       set -g mouse on
@@ -223,17 +164,11 @@ write_files:
       #!/bin/bash
       exec > /var/log/cloudcode-playwright.log 2>&1
       set -euo pipefail
-
       STATUS_FILE=/home/claude/.cloudcode/playwright-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
       echo '{{"status":"installing"}}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
+      for attempt in 1 2; do
         echo "Playwright install attempt $attempt..."
         if timeout 20m su - claude -c 'export PATH="$HOME/.local/bin:$PATH" && npx playwright install --with-deps chromium'; then
           echo '{{"status":"ready"}}' > "$STATUS_FILE"
@@ -241,45 +176,40 @@ write_files:
           chmod 0600 "$STATUS_FILE"
           exit 0
         fi
-        echo "Playwright attempt $attempt failed, waiting 15s..."
-        sleep 15
+        echo "Playwright attempt $attempt failed, waiting 5s..."
+        sleep 5
       done
-
-      echo '{{"status":"failed","error":"Playwright browser install failed after 3 attempts. Check /var/log/cloudcode-playwright.log"}}' > "$STATUS_FILE"
+      echo '{{"status":"failed","error":"Playwright browser install failed after 2 attempts. Check /var/log/cloudcode-playwright.log"}}' > "$STATUS_FILE"
       chown claude:claude "$STATUS_FILE"
       chmod 0600 "$STATUS_FILE"
-  - path: /opt/cloudcode-codex-setup.sh
+  - path: /opt/cloudcode-npm-providers-setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      exec > /var/log/cloudcode-codex.log 2>&1
+      exec > /var/log/cloudcode-npm-providers.log 2>&1
       set -euo pipefail
-
-      STATUS_FILE=/home/claude/.cloudcode/codex-status.json
-
-      mkdir -p /home/claude/.cloudcode
-      chown -R claude:claude /home/claude/.cloudcode
-
-      echo '{{"status":"installing"}}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-
-      for attempt in 1 2 3; do
-        echo "Codex install attempt $attempt..."
-        if timeout 15m npm install -g @openai/codex && command -v codex >/dev/null 2>&1; then
-          echo '{{"status":"ready"}}' > "$STATUS_FILE"
-          chown claude:claude "$STATUS_FILE"
-          chmod 0600 "$STATUS_FILE"
-          exit 0
-        fi
-        echo "Codex attempt $attempt failed, waiting 15s..."
-        sleep 15
+      # Mark all npm providers as installing
+{npm_status_inits}
+      for name in {npm_status_names_space}; do
+        echo '{{"status":"installing"}}' > "/home/claude/.cloudcode/${{name}}-status.json"
+        chown claude:claude "/home/claude/.cloudcode/${{name}}-status.json"
+        chmod 0600 "/home/claude/.cloudcode/${{name}}-status.json"
       done
 
-      echo '{{"status":"failed","error":"Codex CLI install failed after 3 attempts. Check /var/log/cloudcode-codex.log"}}' > "$STATUS_FILE"
-      chown claude:claude "$STATUS_FILE"
-      chmod 0600 "$STATUS_FILE"
-{extra_write_files}  - path: /opt/cloudcode-setup.sh
+      for attempt in 1 2; do
+        echo "Batch npm provider install attempt $attempt..."
+        if timeout 15m npm install -g {npm_packages_str}; then
+          echo "Batch npm install succeeded on attempt $attempt"
+{npm_status_ready_lines}
+          exit 0
+        fi
+        echo "Batch npm install attempt $attempt failed, waiting 5s..."
+        sleep 5
+      done
+
+      echo "Batch npm install failed after 2 attempts"
+{npm_status_failed_lines}
+{curl_write_files}  - path: /opt/cloudcode-setup.sh
     permissions: '0755'
     content: |
       #!/bin/bash
@@ -288,20 +218,27 @@ write_files:
 
       echo "=== cloudcode setup started at $(date) ==="
 
+      # Fix ownership of files written before user creation
+      chown claude:claude /home/claude/.tmux.conf 2>/dev/null || true
+
+      # Install Node.js 22 via NodeSource
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y nodejs
+
       # Install Claude Code via npm (global install as root)
       CLAUDE_INSTALLED=false
-      for attempt in 1 2 3; do
+      for attempt in 1 2; do
         echo "Claude Code install attempt $attempt..."
         if /usr/bin/npm install -g @anthropic-ai/claude-code; then
           CLAUDE_INSTALLED=true
           break
         fi
-        echo "Attempt $attempt failed, waiting 10s..."
-        sleep 10
+        echo "Attempt $attempt failed, waiting 5s..."
+        sleep 5
       done
 
       if [ "$CLAUDE_INSTALLED" = false ]; then
-        echo '{{"status":"error","error":"Claude Code install failed after 3 attempts"}}' > /home/claude/.cloudcode-status.json
+        echo '{{"status":"error","error":"Claude Code install failed after 2 attempts"}}' > /home/claude/.cloudcode-status.json
         chown claude:claude /home/claude/.cloudcode-status.json
         exit 1
       fi
@@ -330,19 +267,11 @@ write_files:
       echo '{{"status":"pending"}}' > /home/claude/.cloudcode/playwright-status.json
       chown claude:claude /home/claude/.cloudcode/playwright-status.json
       chmod 0600 /home/claude/.cloudcode/playwright-status.json
-      echo '{{"status":"pending"}}' > /home/claude/.cloudcode/codex-status.json
-      chown claude:claude /home/claude/.cloudcode/codex-status.json
-      chmod 0600 /home/claude/.cloudcode/codex-status.json
-{extra_status_inits}
-      # Browser automation is non-blocking for first-use readiness. Install it in the background.
+{curl_status_inits}
+      # Background installs (all run in parallel)
       nohup /opt/cloudcode-playwright-setup.sh >/dev/null 2>&1 &
-
-      # Codex CLI install is also non-blocking for first-use readiness.
-      nohup /opt/cloudcode-codex-setup.sh >/dev/null 2>&1 &
-
-      # Additional provider installs (non-blocking background)
-{extra_nohup_launches}
-
+      nohup /opt/cloudcode-npm-providers-setup.sh >/dev/null 2>&1 &
+{curl_nohup_launches}
       echo "=== cloudcode setup completed at $(date) ==="
 
       # Clean up cloud-init data (may contain sensitive info)
@@ -353,7 +282,8 @@ write_files:
 runcmd:
   - chown -R claude:claude /home/claude
   - /opt/cloudcode-setup.sh
-"##
+"##,
+        npm_status_names_space = npm_status_names.join(" "),
     )
 }
 
@@ -430,7 +360,7 @@ mod tests {
             api_key: Some("amp-key".to_string()),
         });
         let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
-        assert!(output.contains("cloudcode-amp-setup.sh"));
+        // Amp is npm-based, so it should be in the batched npm install
         assert!(output.contains("@sourcegraph/amp"));
         assert!(output.contains("amp-status.json"));
     }
@@ -443,6 +373,7 @@ mod tests {
             api_key: Some("oc-key".to_string()),
         });
         let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
+        // OpenCode uses curl installer, so it gets its own script
         assert!(output.contains("cloudcode-opencode-setup.sh"));
         assert!(output.contains("opencode.ai/install"));
         assert!(output.contains("opencode-status.json"));
@@ -456,7 +387,7 @@ mod tests {
             api_key: Some("pi-key".to_string()),
         });
         let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
-        assert!(output.contains("cloudcode-pi-setup.sh"));
+        // Pi is npm-based, so it should be in the batched npm install
         assert!(output.contains("@mariozechner/pi-coding-agent"));
         assert!(output.contains("pi-status.json"));
     }
@@ -469,18 +400,57 @@ mod tests {
             api_key: Some("cursor-key".to_string()),
         });
         let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
+        // Cursor uses curl installer, so it gets its own script
         assert!(output.contains("cloudcode-cursor-setup.sh"));
         assert!(output.contains("cursor.com/install"));
         assert!(output.contains("cursor-status.json"));
     }
 
     #[test]
-    fn cloud_init_excludes_new_providers_when_not_configured() {
+    fn cloud_init_excludes_optional_providers_when_not_configured() {
         let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_config());
-        assert!(!output.contains("cloudcode-amp-setup.sh"));
+        // Curl-based providers should not have scripts
         assert!(!output.contains("cloudcode-opencode-setup.sh"));
-        assert!(!output.contains("cloudcode-pi-setup.sh"));
         assert!(!output.contains("cloudcode-cursor-setup.sh"));
+        // npm-based optional providers should not be in the package list
+        assert!(!output.contains("@sourcegraph/amp"));
+        assert!(!output.contains("@mariozechner/pi-coding-agent"));
+    }
+
+    #[test]
+    fn cloud_init_batches_npm_packages() {
+        let mut config = dummy_config();
+        config.amp = Some(AiProviderConfig {
+            auth_method: AuthMethod::ApiKey,
+            api_key: Some("amp-key".to_string()),
+        });
+        config.pi = Some(AiProviderConfig {
+            auth_method: AuthMethod::ApiKey,
+            api_key: Some("pi-key".to_string()),
+        });
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &config);
+        // All npm packages should be in a single npm install command
+        assert!(output.contains("npm install -g @openai/codex @sourcegraph/amp @mariozechner/pi-coding-agent"));
+        // Should use the batched setup script, not individual ones
+        assert!(output.contains("cloudcode-npm-providers-setup.sh"));
+    }
+
+    #[test]
+    fn cloud_init_has_single_runcmd_section() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_config());
+        // There should be exactly one runcmd: key in the YAML
+        let count = output.matches("\nruncmd:").count();
+        assert_eq!(count, 1, "Should have exactly one runcmd section, found {}", count);
+    }
+
+    #[test]
+    fn cloud_init_node_install_in_setup_script() {
+        let output = generate_cloud_init("ssh-ed25519 AAAA test@test", &dummy_config());
+        // NodeSource install should be inside the setup script, not in runcmd
+        let setup_script_start = output.find("cloudcode-setup.sh").unwrap();
+        let nodesource_pos = output.find("nodesource.com/setup_22.x").unwrap();
+        assert!(nodesource_pos > setup_script_start,
+            "NodeSource install should be inside the setup script");
     }
 }
 
