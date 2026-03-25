@@ -203,8 +203,12 @@ packages:
   - curl
   - jq
   - git
-  - nodejs
-  - npm
+  - ca-certificates
+  - gnupg
+
+runcmd:
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
 
 write_files:
   - path: /opt/cloudcode-playwright-setup.sh
@@ -392,8 +396,8 @@ mod tests {
         assert!(output.contains("- tmux"));
         assert!(output.contains("- curl"));
         assert!(output.contains("- git"));
-        assert!(output.contains("- nodejs"));
-        assert!(output.contains("- npm"));
+        assert!(output.contains("nodesource.com/setup_22.x"));
+        assert!(output.contains("apt-get install -y nodejs"));
         assert!(output.contains("/opt/cloudcode-playwright-setup.sh"));
     }
 

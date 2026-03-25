@@ -72,11 +72,11 @@ static CODEX_META: ProviderMeta = ProviderMeta {
 static AMP_META: ProviderMeta = ProviderMeta {
     binary: "amp",
     display_name: "Amp",
-    install_cmd: "curl -fsSL https://ampcode.com/install.sh | sh",
+    install_cmd: "npm install -g @sourcegraph/amp",
     version_cmd: "amp --version",
-    auth_files: &[".config/amp/credentials.json"],
+    auth_files: &[".config/amp/settings.json"],
     auth_env_vars: &["AMP_API_KEY"],
-    stable: false,
+    stable: true,
     idle_patterns: &["⚡", "⚡ "],
     prompt_patterns: &["Amp v", "amp ready"],
     supports_bridge_echo: true,
@@ -85,11 +85,11 @@ static AMP_META: ProviderMeta = ProviderMeta {
 static OPENCODE_META: ProviderMeta = ProviderMeta {
     binary: "opencode",
     display_name: "OpenCode",
-    install_cmd: "curl -fsSL https://opencode.ai/install.sh | sh",
+    install_cmd: "curl -fsSL https://opencode.ai/install | bash",
     version_cmd: "opencode --version",
-    auth_files: &[".config/opencode/auth.json"],
-    auth_env_vars: &["OPENCODE_API_KEY"],
-    stable: false,
+    auth_files: &[".local/share/opencode/auth.json"],
+    auth_env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+    stable: true,
     idle_patterns: &["opencode>", "opencode> "],
     prompt_patterns: &["OpenCode v", "opencode ready"],
     supports_bridge_echo: true,
@@ -102,7 +102,7 @@ static PI_META: ProviderMeta = ProviderMeta {
     version_cmd: "pi --version",
     auth_files: &[".config/pi/credentials.json"],
     auth_env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
-    stable: false,
+    stable: true,
     idle_patterns: &["λ", "λ "],
     prompt_patterns: &["Pi v", "pi ready"],
     supports_bridge_echo: true,
@@ -113,12 +113,12 @@ static CURSOR_META: ProviderMeta = ProviderMeta {
     display_name: "Cursor",
     install_cmd: "curl -fsSL https://cursor.com/install | bash",
     version_cmd: "cursor-agent --version",
-    auth_files: &[".cursor/auth.json"],
+    auth_files: &[".config/cursor/auth.json"],
     auth_env_vars: &["CURSOR_API_KEY"],
-    stable: false,
+    stable: true,
     idle_patterns: &["▶", "▶ "],
     prompt_patterns: &["Cursor v", "cursor ready"],
-    supports_bridge_echo: true,
+    supports_bridge_echo: false,
 };
 
 impl Default for AiProvider {
@@ -215,7 +215,22 @@ impl AiProvider {
                      sleep 3; done"
                 )
             }
+            Self::Amp => {
+                format!(
+                    "while true; do {bin} --no-notifications --dangerously-allow-all; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            Self::Cursor => {
+                format!(
+                    "while true; do {bin} --model auto --yolo; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
             _ => {
+                // OpenCode and Pi: plain interactive TUI, no special flags needed
                 format!(
                     "while true; do {bin}; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
@@ -398,13 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn stable_providers() {
-        assert!(AiProvider::Claude.meta().stable);
-        assert!(AiProvider::Codex.meta().stable);
-        assert!(!AiProvider::Amp.meta().stable);
-        assert!(!AiProvider::OpenCode.meta().stable);
-        assert!(!AiProvider::Pi.meta().stable);
-        assert!(!AiProvider::Cursor.meta().stable);
+    fn all_providers_stable() {
+        for &provider in AiProvider::ALL {
+            assert!(
+                provider.meta().stable,
+                "{:?} should be stable",
+                provider
+            );
+        }
     }
 
     #[test]
