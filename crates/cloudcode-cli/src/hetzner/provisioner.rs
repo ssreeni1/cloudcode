@@ -211,6 +211,12 @@ runcmd:
   - apt-get install -y nodejs
 
 write_files:
+  - path: /home/claude/.tmux.conf
+    owner: claude:claude
+    permissions: '0644'
+    content: |
+      set -g mouse on
+      set -g set-clipboard on
   - path: /opt/cloudcode-playwright-setup.sh
     permissions: '0755'
     content: |
