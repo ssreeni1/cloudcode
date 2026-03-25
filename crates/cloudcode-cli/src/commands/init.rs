@@ -409,49 +409,82 @@ pub async fn run(auto: bool, reauth: bool) -> Result<()> {
     }
 
     // Step 5: Auth for additional providers (Amp, OpenCode, Pi, Cursor)
+    // Detect which existing credentials can be proxied
+    let has_anthropic_auth = config
+        .claude
+        .as_ref()
+        .map_or(false, |c| c.api_key.is_some() || c.auth_method == AuthMethod::Oauth);
+    let has_openai_auth = config
+        .codex
+        .as_ref()
+        .map_or(false, |c| c.api_key.is_some() || c.auth_method == AuthMethod::Oauth);
+
     for &provider in &[AiProvider::Amp, AiProvider::OpenCode, AiProvider::Pi, AiProvider::Cursor] {
         if !selected_providers.contains(&provider) {
             continue;
         }
-        let meta = provider.meta();
         let step_label = format!("Step 5: {} Authentication", provider.display_name());
         if !reauth || !has_provider_config(&config, provider) {
             println!("\n{}", step_label.bold().cyan());
 
-            if !meta.stable {
-                println!(
-                    "  {} {}",
-                    "!".yellow().bold(),
-                    format!("{} is experimental — headless auth may not work yet.", provider.display_name()).yellow()
-                );
-            }
+            // Determine which existing auth this provider can use
+            let meta = provider.meta();
+            let can_use_anthropic = meta.auth_env_vars.contains(&"ANTHROPIC_API_KEY") && has_anthropic_auth;
+            let can_use_openai = meta.auth_env_vars.contains(&"OPENAI_API_KEY") && has_openai_auth;
+            let can_proxy = can_use_anthropic || can_use_openai;
 
-            let auth_options = vec!["API Key", "Skip (configure later)"];
+            let proxy_source = if can_use_anthropic {
+                "Claude"
+            } else if can_use_openai {
+                "Codex"
+            } else {
+                ""
+            };
+
+            let mut auth_options = Vec::new();
+            if can_proxy {
+                auth_options.push(format!("Use {} credentials (recommended)", proxy_source));
+            }
+            auth_options.push("API Key".to_string());
+            auth_options.push("Skip (configure later)".to_string());
+
+            let auth_refs: Vec<&str> = auth_options.iter().map(|s| s.as_str()).collect();
             let auth_selection = Select::new()
                 .with_prompt(format!("How would you like to authenticate with {}?", provider.display_name()))
-                .items(&auth_options)
+                .items(&auth_refs)
                 .default(0)
                 .interact()?;
 
-            let provider_config = match auth_selection {
-                0 => {
-                    let api_key: String = Input::new()
-                        .with_prompt(format!("Enter your {} API key", provider.display_name()))
-                        .interact_text()?;
-                    println!(
-                        "  {} API key saved ({})",
-                        "✓".green().bold(),
-                        mask_secret(&api_key).dimmed()
-                    );
-                    Some(AiProviderConfig {
-                        auth_method: AuthMethod::ApiKey,
-                        api_key: Some(api_key),
-                    })
-                }
-                _ => {
-                    println!("  {} Skipped", "−".dimmed());
-                    None
-                }
+            let chosen = &auth_options[auth_selection];
+            let provider_config = if chosen.starts_with("Use ") {
+                // Proxy from existing credentials
+                println!(
+                    "  {} {} will use {} credentials automatically on the VPS",
+                    "✓".green().bold(),
+                    provider.display_name(),
+                    proxy_source
+                );
+                // Create a config entry with oauth method (signals "use proxy, no separate key")
+                Some(AiProviderConfig {
+                    auth_method: AuthMethod::Oauth,
+                    api_key: None,
+                })
+            } else if chosen == "API Key" {
+                let api_key: String = Input::new()
+                    .with_prompt(format!("Enter your {} API key", provider.display_name()))
+                    .interact_text()?;
+                println!(
+                    "  {} API key saved ({})",
+                    "✓".green().bold(),
+                    mask_secret(&api_key).dimmed()
+                );
+                Some(AiProviderConfig {
+                    auth_method: AuthMethod::ApiKey,
+                    api_key: Some(api_key),
+                })
+            } else {
+                println!("  {} Skipped", "−".dimmed());
+                None
             };
 
             match provider {
