@@ -190,12 +190,40 @@ impl AiProvider {
         )
     }
 
+    /// Shell snippet that discovers and exports existing auth credentials
+    /// from other providers. Runs before the provider binary starts.
+    ///
+    /// Cross-pollination rules:
+    /// - Claude OAuth (`~/.claude/.credentials.json`) → extracts `ANTHROPIC_API_KEY` for Pi, OpenCode
+    /// - Codex OAuth (`~/.codex/auth.json`) → extracts `OPENAI_API_KEY` for Pi, OpenCode
+    /// - Env file vars are already inherited via systemd EnvironmentFile
+    fn auth_proxy_snippet(home: &str) -> String {
+        format!(
+            r#"# --- cloudcode auth proxy: share credentials across providers ---
+if [ -z "$ANTHROPIC_API_KEY" ] && [ -f {home}/.claude/.credentials.json ]; then
+  _KEY=$(python3 -c "import json; d=json.load(open('{home}/.claude/.credentials.json')); print(d.get('claudeAiOauth',{{}}).get('accessToken',''))" 2>/dev/null)
+  [ -n "$_KEY" ] && export ANTHROPIC_API_KEY="$_KEY" && echo '[cloudcode] Using Claude OAuth token for authentication'
+fi
+if [ -z "$OPENAI_API_KEY" ] && [ -f {home}/.codex/auth.json ]; then
+  _KEY=$(python3 -c "import json; d=json.load(open('{home}/.codex/auth.json')); print(d.get('token','') or d.get('access_token',''))" 2>/dev/null)
+  [ -n "$_KEY" ] && export OPENAI_API_KEY="$_KEY" && echo '[cloudcode] Using Codex OAuth token for authentication'
+fi
+# --- end auth proxy ---
+"#
+        )
+    }
+
     /// Build the shell command to spawn this provider in a tmux session.
     ///
     /// `home` is the $HOME directory on the remote VPS (e.g. "/home/claude").
     pub fn spawn_command(&self, home: &str) -> String {
         let bin = self.resolve_bin(home);
         let name = self.display_name();
+        // Providers that benefit from cross-provider auth get the proxy snippet
+        let auth = match self {
+            Self::Claude | Self::Codex => String::new(), // handle their own auth
+            _ => Self::auth_proxy_snippet(home),
+        };
         match self {
             Self::Claude => {
                 format!(
@@ -217,14 +245,14 @@ impl AiProvider {
             }
             Self::Amp => {
                 format!(
-                    "while true; do {bin} --no-notifications --dangerously-allow-all; \
+                    "{auth}while true; do {bin} --no-notifications --dangerously-allow-all; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
             }
             Self::Cursor => {
                 format!(
-                    "while true; do {bin} --model auto --yolo; \
+                    "{auth}while true; do {bin} --model auto --yolo; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
@@ -232,7 +260,7 @@ impl AiProvider {
             _ => {
                 // OpenCode and Pi: plain interactive TUI, no special flags needed
                 format!(
-                    "while true; do {bin}; \
+                    "{auth}while true; do {bin}; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
