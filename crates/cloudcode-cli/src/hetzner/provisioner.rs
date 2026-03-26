@@ -44,11 +44,17 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
       chmod 0600 "$STATUS_FILE"
       for attempt in 1 2; do
         echo "OpenCode install attempt $attempt..."
-        if timeout 10m bash -c 'export HOME=/home/claude && curl -fsSL https://opencode.ai/install | bash' && command -v opencode >/dev/null 2>&1; then
-          echo '{"status":"ready"}' > "$STATUS_FILE"
-          chown claude:claude "$STATUS_FILE"
-          chmod 0600 "$STATUS_FILE"
-          exit 0
+        if timeout 10m bash -c 'export HOME=/home/claude && curl -fsSL https://opencode.ai/install | bash'; then
+          # Fix ownership — curl installer creates dirs as root
+          chown -R claude:claude /home/claude/.local /home/claude/.opencode 2>/dev/null || true
+          # Symlink into PATH
+          ln -sf /home/claude/.opencode/bin/opencode /home/claude/.local/bin/opencode 2>/dev/null || true
+          if command -v opencode >/dev/null 2>&1 || test -x /home/claude/.local/bin/opencode; then
+            echo '{"status":"ready"}' > "$STATUS_FILE"
+            chown claude:claude "$STATUS_FILE"
+            chmod 0600 "$STATUS_FILE"
+            exit 0
+          fi
         fi
         echo "OpenCode attempt $attempt failed, waiting 5s..."
         sleep 5
@@ -79,11 +85,15 @@ pub fn generate_cloud_init(ssh_pub_key: &str, config: &Config) -> String {
       chmod 0600 "$STATUS_FILE"
       for attempt in 1 2; do
         echo "Cursor install attempt $attempt..."
-        if timeout 10m bash -c 'export HOME=/home/claude && curl https://cursor.com/install -fsSL | bash' && (command -v cursor-agent >/dev/null 2>&1 || test -x /home/claude/.local/bin/cursor-agent); then
-          echo '{"status":"ready"}' > "$STATUS_FILE"
-          chown claude:claude "$STATUS_FILE"
-          chmod 0600 "$STATUS_FILE"
-          exit 0
+        if timeout 10m bash -c 'export HOME=/home/claude && curl https://cursor.com/install -fsSL | bash'; then
+          # Fix ownership — curl installer creates dirs as root
+          chown -R claude:claude /home/claude/.local /home/claude/.cursor 2>/dev/null || true
+          if command -v cursor-agent >/dev/null 2>&1 || test -x /home/claude/.local/bin/cursor-agent; then
+            echo '{"status":"ready"}' > "$STATUS_FILE"
+            chown claude:claude "$STATUS_FILE"
+            chmod 0600 "$STATUS_FILE"
+            exit 0
+          fi
         fi
         echo "Cursor attempt $attempt failed, waiting 5s..."
         sleep 5

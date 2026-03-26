@@ -244,8 +244,15 @@ fi
                 )
             }
             Self::Amp => {
+                // Amp: --no-notifications only. Do NOT use --dangerously-allow-all
+                // (it triggers execute mode which requires stdin message).
+                // Amp needs `amp login` first — shows a URL the user opens in any browser.
                 format!(
-                    "{auth}while true; do {bin} --no-notifications --dangerously-allow-all; \
+                    "{auth}if ! {bin} threads list >/dev/null 2>&1; then \
+                       echo '[cloudcode] {name} needs authentication. Run: amp login'; \
+                       {bin} login; \
+                     fi; \
+                     while true; do {bin} --no-notifications; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
                      sleep 3; done"
                 )
@@ -257,8 +264,24 @@ fi
                      sleep 3; done"
                 )
             }
+            Self::Pi => {
+                // Pi uses ANTHROPIC_API_KEY from the auth proxy. If no key is
+                // available, tell the user to log into Claude first (Pi's own
+                // OAuth redirects to localhost which doesn't work on a VPS).
+                format!(
+                    "{auth}if [ -z \"$ANTHROPIC_API_KEY\" ] && [ -z \"$OPENAI_API_KEY\" ]; then \
+                       echo '[cloudcode] Pi needs an API key. Log into Claude or Codex first,'; \
+                       echo '  then Pi will use those credentials automatically.'; \
+                       echo '  Run: /provider claude, /open <session>, complete login, then try Pi again.'; \
+                       sleep 10; exit 1; \
+                     fi; \
+                     while true; do {bin}; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
             _ => {
-                // OpenCode and Pi: plain interactive TUI, no special flags needed
+                // OpenCode: plain interactive TUI
                 format!(
                     "{auth}while true; do {bin}; \
                      echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
