@@ -101,6 +101,78 @@ pub struct DaemonState {
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Send a message to a session with up to 3 retries, backing off 5s between
+/// transient failures. Returns immediately on auth errors, missing sessions,
+/// or timeouts.
+async fn send_with_retries(
+    session_mgr: &SessionManager,
+    session: &str,
+    text: &str,
+) -> anyhow::Result<crate::session::manager::SendOutput> {
+    let mut result = Err(anyhow::anyhow!("not started"));
+    for attempt in 0..3 {
+        result = session_mgr.send(session, text).await;
+        match &result {
+            Ok(_) => break,
+            Err(err) => {
+                let err_str = err.to_string();
+                if super::handlers::is_auth_error(err, session_mgr.current_provider())
+                    || err_str.contains("does not exist")
+                    || err_str.contains("timed out")
+                {
+                    break;
+                }
+                if attempt < 2 {
+                    log::warn!(
+                        "Send attempt {} failed ({}), retrying in 5s...",
+                        attempt + 1,
+                        err_str
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Build a user-facing auth hint for the given provider.
+fn auth_hint_for(provider: AiProvider) -> String {
+    match provider {
+        AiProvider::Claude => {
+            "Complete login from your terminal:\n\
+             1. cloudcode open <session>\n\
+             2. Copy the login URL and paste in your browser\n\
+             3. Complete the OAuth flow"
+                .to_string()
+        }
+        AiProvider::Codex => {
+            "Complete login from your terminal:\n\
+             1. cloudcode open <session>\n\
+             2. Select 'Device code' when prompted\n\
+             3. Visit the URL in your browser to authorize"
+                .to_string()
+        }
+        _ => {
+            let meta = provider.meta();
+            let env_var = meta
+                .auth_env_vars
+                .first()
+                .copied()
+                .unwrap_or("the provider API key");
+            format!(
+                "Set {env_var} or authenticate via `cloudcode open <session>` \
+                 to complete {} setup.",
+                meta.display_name
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Help text
 // ---------------------------------------------------------------------------
 
@@ -109,7 +181,7 @@ const HELP_TEXT: &str = "🤖 cloudcode Telegram Bot\n\n\
     /list — List active sessions\n\
     /kill <name> — Kill a session\n\
     /use <name> — Set default session\n\
-    /provider [claude|codex] — Check or switch AI provider\n\
+    /provider [claude|codex|amp|opencode|pi|cursor] — Check or switch AI provider\n\
     /waiting — List sessions waiting for input\n\
     /reply [session] <text> — Reply to a waiting session\n\
     /context [session] — View session context\n\
@@ -203,21 +275,7 @@ pub async fn spawn_logic(state: &DaemonState, args: &str) -> DispatchResult {
                     session.name
                 ))
             } else {
-                let auth_hint = match provider {
-                    AiProvider::Claude => {
-                        "Complete login from your terminal:\n\
-                         1. cloudcode open {session}\n\
-                         2. Copy the login URL and paste in your browser\n\
-                         3. Complete the OAuth flow"
-                    }
-                    AiProvider::Codex => {
-                        "Complete login from your terminal:\n\
-                         1. cloudcode open {session}\n\
-                         2. Select 'Device code' when prompted\n\
-                         3. Visit the URL in your browser to authorize"
-                    }
-                };
-                let hint = auth_hint.replace("{session}", &session.name);
+                let hint = auth_hint_for(provider);
                 DispatchResult::plain(format!(
                     "⚠️ Session '{}' created, but {} needs authentication first.\n\n{}\n\nTelegram will work once login is complete.",
                     session.name, provider, hint
@@ -227,17 +285,9 @@ pub async fn spawn_logic(state: &DaemonState, args: &str) -> DispatchResult {
         Err(err) => {
             let provider = state.session_mgr.current_provider();
             if super::handlers::is_auth_error(&err, provider) {
-                let auth_hint = match provider {
-                    AiProvider::Claude => {
-                        "Run `cloudcode open <session>` from your terminal to complete the OAuth login."
-                    }
-                    AiProvider::Codex => {
-                        "Run `cloudcode open <session>` from your terminal, select 'Device code', and authorize in your browser."
-                    }
-                };
                 DispatchResult::plain(format!(
                     "❌ {} needs authentication.\n\n{}",
-                    provider, auth_hint
+                    provider, auth_hint_for(provider)
                 ))
             } else {
                 DispatchResult::error(err.to_string())
@@ -320,24 +370,32 @@ pub async fn use_logic(state: &DaemonState, args: &str) -> DispatchResult {
 pub async fn provider_logic(state: &DaemonState, args: &str) -> DispatchResult {
     if args.is_empty() {
         let current = state.session_mgr.current_provider();
-        let claude_status = super::handlers::provider_status(AiProvider::Claude);
-        let codex_status = super::handlers::provider_status(AiProvider::Codex);
-        DispatchResult::plain(format!(
-            "🤖 Current provider: {}\n\n\
-             Claude: {}\n\
-             Codex: {}\n\n\
-             Use /provider claude or /provider codex to switch.",
-            current.display_name(),
-            claude_status.summary,
-            codex_status.summary,
-        ))
+        let mut text = format!("🤖 Current provider: {}\n\n", current.display_name());
+        for &p in AiProvider::ALL {
+            let status = super::handlers::provider_status(p);
+            text.push_str(&format!("{}: {}\n", p.display_name(), status.summary));
+        }
+        text.push_str(&format!(
+            "\nUse /provider <name> to switch. Valid: {}",
+            AiProvider::ALL
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        DispatchResult::plain(text)
     } else {
         let target: AiProvider = match args.parse() {
             Ok(p) => p,
             Err(_) => {
-                return DispatchResult::plain(
-                    "Unknown provider. Use /provider claude or /provider codex",
-                );
+                return DispatchResult::plain(format!(
+                    "Unknown provider. Valid: {}",
+                    AiProvider::ALL
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
         };
 
@@ -574,74 +632,14 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
     };
 
     let provider = state.session_mgr.current_provider();
-    let send_result = match provider {
-        AiProvider::Codex => {
-            // Codex: use print mode (codex exec).
-            // send_via_tmux doesn't work with Codex's TUI input handler.
-            let mut result = Err(anyhow::anyhow!("not started"));
-            for attempt in 0..3 {
-                result = state.session_mgr.send(&session_name, text).await;
-                match &result {
-                    Ok(_) => break,
-                    Err(err) => {
-                        let err_str = err.to_string();
-                        if super::handlers::is_auth_error(err, state.session_mgr.current_provider())
-                            || err_str.contains("does not exist")
-                            || err_str.contains("timed out")
-                        {
-                            break;
-                        }
-                        if attempt < 2 {
-                            log::warn!(
-                                "Send attempt {} failed ({}), retrying in 5s...",
-                                attempt + 1,
-                                err_str
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        }
-                    }
-                }
-            }
-            result
-        }
-        AiProvider::Claude => {
-            // Claude: use print mode (clean stdout, --continue preserves context)
-            // Retry transient errors up to 3 times
-            let mut result = Err(anyhow::anyhow!("not started"));
-            for attempt in 0..3 {
-                result = state.session_mgr.send(&session_name, text).await;
-                match &result {
-                    Ok(_) => break,
-                    Err(err) => {
-                        let err_str = err.to_string();
-                        if super::handlers::is_auth_error(err, state.session_mgr.current_provider())
-                            || err_str.contains("does not exist")
-                            || err_str.contains("timed out")
-                        {
-                            break;
-                        }
-                        if attempt < 2 {
-                            log::warn!(
-                                "Send attempt {} failed ({}), retrying in 5s...",
-                                attempt + 1,
-                                err_str
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        }
-                    }
-                }
-            }
-            result
-        }
-    };
+    let send_result = send_with_retries(&state.session_mgr, &session_name, text).await;
 
     let mut final_result = match send_result {
         Ok(result) => {
             // Notification bridge: echo TG activity into tmux
             // so CLI users see what happened.
-            // Claude only — Codex exec is a separate process so echoing
-            // into the interactive tmux just confuses Codex's TUI.
-            if provider == AiProvider::Claude {
+            // Only for providers whose TUI supports injected text.
+            if provider.meta().supports_bridge_echo {
                 let summary = if result.text.len() > 200 {
                     format!("{}...", &result.text[..200])
                 } else {
@@ -663,23 +661,9 @@ pub async fn free_text_logic(state: &DaemonState, text: &str) -> DispatchResult 
         Err(err) => {
             let provider = state.session_mgr.current_provider();
             if super::handlers::is_auth_error(&err, provider) {
-                let auth_hint = match provider {
-                    AiProvider::Claude => {
-                        "Complete login from your terminal:\n\
-                         1. cloudcode open <session>\n\
-                         2. Copy the login URL and paste in your browser\n\
-                         3. Complete the OAuth flow"
-                    }
-                    AiProvider::Codex => {
-                        "Complete login from your terminal:\n\
-                         1. cloudcode open <session>\n\
-                         2. Select 'Device code' when prompted\n\
-                         3. Visit the URL in your browser to authorize"
-                    }
-                };
                 DispatchResult::plain(format!(
                     "❌ {} needs authentication.\n\n{}\n\nTelegram will work once login is complete.",
-                    provider, auth_hint
+                    provider, auth_hint_for(provider)
                 ))
             } else {
                 DispatchResult::error(err.to_string())

@@ -1,4 +1,4 @@
-use cloudcode_common::protocol::{DaemonRequest, DaemonResponse};
+use cloudcode_common::protocol::{DaemonRequest, DaemonResponse, ProviderHealthInfo};
 use cloudcode_common::session::{SessionInfo, SessionState};
 
 // ---------------------------------------------------------------------------
@@ -220,6 +220,24 @@ mod daemon_request {
             }
             other => panic!("Expected Send, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn provider_health_roundtrip() {
+        let req = DaemonRequest::ProviderHealth;
+        let json = serde_json::to_string(&req).unwrap();
+        let deserialized: DaemonRequest = serde_json::from_str(&json).unwrap();
+
+        assert!(matches!(deserialized, DaemonRequest::ProviderHealth));
+    }
+
+    #[test]
+    fn provider_health_tagged_format() {
+        let req = DaemonRequest::ProviderHealth;
+        let json = serde_json::to_string(&req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["type"], "provider_health");
     }
 }
 
@@ -484,6 +502,74 @@ mod daemon_response {
             other => panic!("Expected Error, got {:?}", other),
         }
     }
+
+    #[test]
+    fn provider_health_roundtrip() {
+        let resp = DaemonResponse::ProviderHealth {
+            providers: vec![
+                ProviderHealthInfo {
+                    provider: "claude".to_string(),
+                    installed: true,
+                    version: Some("1.0.0".to_string()),
+                    has_auth: true,
+                    ready: true,
+                    stable: true,
+                },
+                ProviderHealthInfo {
+                    provider: "amp".to_string(),
+                    installed: false,
+                    version: None,
+                    has_auth: false,
+                    ready: false,
+                    stable: false,
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            DaemonResponse::ProviderHealth { providers } => {
+                assert_eq!(providers.len(), 2);
+                assert_eq!(providers[0].provider, "claude");
+                assert!(providers[0].installed);
+                assert_eq!(providers[0].version, Some("1.0.0".to_string()));
+                assert!(providers[0].has_auth);
+                assert!(providers[0].ready);
+                assert!(providers[0].stable);
+                assert_eq!(providers[1].provider, "amp");
+                assert!(!providers[1].installed);
+                assert_eq!(providers[1].version, None);
+                assert!(!providers[1].has_auth);
+                assert!(!providers[1].ready);
+                assert!(!providers[1].stable);
+            }
+            other => panic!("Expected ProviderHealth, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn provider_health_tagged_format() {
+        let resp = DaemonResponse::ProviderHealth {
+            providers: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["type"], "provider_health");
+    }
+
+    #[test]
+    fn provider_health_empty_providers() {
+        let resp = DaemonResponse::ProviderHealth { providers: vec![] };
+        let json = serde_json::to_string(&resp).unwrap();
+        let deserialized: DaemonResponse = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            DaemonResponse::ProviderHealth { providers } => assert!(providers.is_empty()),
+            other => panic!("Expected ProviderHealth, got {:?}", other),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +613,7 @@ mod newline_delimited_protocol {
                 message: "msg".to_string(),
             },
             DaemonRequest::Status,
+            DaemonRequest::ProviderHealth,
         ];
 
         for req in &requests {
@@ -571,6 +658,16 @@ mod newline_delimited_protocol {
             },
             DaemonResponse::Error {
                 message: "fail".to_string(),
+            },
+            DaemonResponse::ProviderHealth {
+                providers: vec![ProviderHealthInfo {
+                    provider: "claude".to_string(),
+                    installed: true,
+                    version: Some("1.0.0".to_string()),
+                    has_auth: true,
+                    ready: true,
+                    stable: true,
+                }],
             },
         ];
 

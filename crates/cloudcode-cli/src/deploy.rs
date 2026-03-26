@@ -447,6 +447,34 @@ pub fn install_daemon(state: &VpsState, config: &crate::config::Config) -> Resul
             }
         }
     }
+    if let Some(ref amp) = config.amp {
+        if matches!(amp.auth_method, AuthMethod::ApiKey) {
+            if let Some(ref key) = amp.api_key {
+                env_file_content.push_str(&format!("AMP_API_KEY={}\n", key));
+            }
+        }
+    }
+    if let Some(ref opencode) = config.opencode {
+        if matches!(opencode.auth_method, AuthMethod::ApiKey) {
+            if let Some(ref key) = opencode.api_key {
+                env_file_content.push_str(&format!("OPENCODE_API_KEY={}\n", key));
+            }
+        }
+    }
+    if let Some(ref pi) = config.pi {
+        if matches!(pi.auth_method, AuthMethod::ApiKey) {
+            if let Some(ref key) = pi.api_key {
+                env_file_content.push_str(&format!("PI_API_KEY={}\n", key));
+            }
+        }
+    }
+    if let Some(ref cursor) = config.cursor {
+        if matches!(cursor.auth_method, AuthMethod::ApiKey) {
+            if let Some(ref key) = cursor.api_key {
+                env_file_content.push_str(&format!("CURSOR_API_KEY={}\n", key));
+            }
+        }
+    }
 
     // Generate systemd unit
     let unit = r#"[Unit]
@@ -460,6 +488,7 @@ ExecStart=/usr/local/bin/cloudcode-daemon /etc/cloudcode/daemon.toml
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/claude/.cloudcode-env
 WorkingDirectory=/home/claude
 ProtectSystem=strict
@@ -563,6 +592,66 @@ if [ -n "{codex_auth_method}" ]; then
   chown claude:claude /home/claude/.cloudcode/codex-auth-method
   chmod 0600 /home/claude/.cloudcode/codex-auth-method
 fi
+"#
+        ));
+    }
+
+    // Amp-specific config: instruction file
+    if config.amp.is_some() {
+        install_script.push_str(&format!(
+            r#"cat << 'AMP_INSTRUCTIONS' > /home/claude/AMP_INSTRUCTIONS.md
+{vps_instructions}
+AMP_INSTRUCTIONS
+chown claude:claude /home/claude/AMP_INSTRUCTIONS.md
+chmod 0644 /home/claude/AMP_INSTRUCTIONS.md
+mkdir -p /home/claude/.config/amp
+chown -R claude:claude /home/claude/.config/amp
+chmod 0700 /home/claude/.config/amp
+"#
+        ));
+    }
+
+    // OpenCode-specific config: instruction file
+    if config.opencode.is_some() {
+        install_script.push_str(&format!(
+            r#"cat << 'OPENCODE_INSTRUCTIONS' > /home/claude/OPENCODE_INSTRUCTIONS.md
+{vps_instructions}
+OPENCODE_INSTRUCTIONS
+chown claude:claude /home/claude/OPENCODE_INSTRUCTIONS.md
+chmod 0644 /home/claude/OPENCODE_INSTRUCTIONS.md
+mkdir -p /home/claude/.config/opencode
+chown -R claude:claude /home/claude/.config/opencode
+chmod 0700 /home/claude/.config/opencode
+"#
+        ));
+    }
+
+    // Pi-specific config: instruction file
+    if config.pi.is_some() {
+        install_script.push_str(&format!(
+            r#"cat << 'PI_INSTRUCTIONS' > /home/claude/PI_INSTRUCTIONS.md
+{vps_instructions}
+PI_INSTRUCTIONS
+chown claude:claude /home/claude/PI_INSTRUCTIONS.md
+chmod 0644 /home/claude/PI_INSTRUCTIONS.md
+mkdir -p /home/claude/.config/pi
+chown -R claude:claude /home/claude/.config/pi
+chmod 0700 /home/claude/.config/pi
+"#
+        ));
+    }
+
+    // Cursor-specific config: instruction file
+    if config.cursor.is_some() {
+        install_script.push_str(&format!(
+            r#"cat << 'CURSOR_INSTRUCTIONS' > /home/claude/CURSOR_INSTRUCTIONS.md
+{vps_instructions}
+CURSOR_INSTRUCTIONS
+chown claude:claude /home/claude/CURSOR_INSTRUCTIONS.md
+chmod 0644 /home/claude/CURSOR_INSTRUCTIONS.md
+mkdir -p /home/claude/.config/cursor
+chown -R claude:claude /home/claude/.config/cursor
+chmod 0700 /home/claude/.config/cursor
 "#
         ));
     }

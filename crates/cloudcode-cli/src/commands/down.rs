@@ -50,7 +50,7 @@ pub async fn run(force: bool) -> Result<()> {
         return Ok(());
     }
 
-    let server_id = state.server_id.unwrap();
+    let server_id = state.server_id.clone().unwrap();
     let server_ip = state.server_ip.as_deref().unwrap_or("unknown");
 
     if !force {

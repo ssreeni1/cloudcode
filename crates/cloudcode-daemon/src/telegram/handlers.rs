@@ -108,22 +108,18 @@ async fn send_dispatch_result(
 // ---------------------------------------------------------------------------
 
 pub(crate) struct ProviderStatus {
-    pub summary: &'static str,
-    pub reason: &'static str,
+    pub summary: String,
+    pub reason: String,
     pub switchable: bool,
 }
 
 pub(crate) fn provider_has_auth(provider: AiProvider) -> bool {
-    match provider {
-        AiProvider::Claude => {
-            std::env::var("ANTHROPIC_API_KEY").is_ok()
-                || std::path::Path::new("/home/claude/.claude/.credentials.json").exists()
-        }
-        AiProvider::Codex => {
-            std::env::var("OPENAI_API_KEY").is_ok()
-                || std::path::Path::new("/home/claude/.codex/auth.json").exists()
-        }
-    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/claude".to_string());
+    let meta = provider.meta();
+    meta.auth_env_vars.iter().any(|var| std::env::var(var).is_ok())
+        || meta.auth_files.iter().any(|f| {
+            std::path::Path::new(&format!("{}/{}", home, f)).exists()
+        })
 }
 
 pub(crate) fn provider_status(provider: AiProvider) -> ProviderStatus {
@@ -131,14 +127,14 @@ pub(crate) fn provider_status(provider: AiProvider) -> ProviderStatus {
         AiProvider::Claude => {
             if provider_has_auth(provider) {
                 ProviderStatus {
-                    summary: "✅ ready",
-                    reason: "configured",
+                    summary: "✅ ready".into(),
+                    reason: "configured".into(),
                     switchable: true,
                 }
             } else {
                 ProviderStatus {
-                    summary: "❌ not configured",
-                    reason: "ANTHROPIC_API_KEY not set and Claude OAuth login not completed",
+                    summary: "❌ not configured".into(),
+                    reason: "ANTHROPIC_API_KEY not set and Claude OAuth login not completed".into(),
                     switchable: false,
                 }
             }
@@ -151,43 +147,86 @@ pub(crate) fn provider_status(provider: AiProvider) -> ProviderStatus {
 
             if install_status.contains("\"pending\"") || install_status.contains("\"installing\"") {
                 return ProviderStatus {
-                    summary: "⏳ installing",
-                    reason: "Codex CLI install is still in progress",
+                    summary: "⏳ installing".into(),
+                    reason: "Codex CLI install is still in progress".into(),
                     switchable: false,
                 };
             }
 
             if install_status.contains("\"failed\"") || !binary_exists {
                 return ProviderStatus {
-                    summary: "❌ not installed",
-                    reason: "Codex CLI is not installed on the VPS yet",
+                    summary: "❌ not installed".into(),
+                    reason: "Codex CLI is not installed on the VPS yet".into(),
                     switchable: false,
                 };
             }
 
             if provider_has_auth(provider) {
                 return ProviderStatus {
-                    summary: "✅ ready",
-                    reason: "configured",
+                    summary: "✅ ready".into(),
+                    reason: "configured".into(),
                     switchable: true,
                 };
             }
 
             let auth_method = std::fs::read_to_string("/home/claude/.cloudcode/codex-auth-method")
                 .unwrap_or_default();
-            let (summary, reason) = if auth_method.trim() == "oauth" {
+            let (summary, reason): (String, String) = if auth_method.trim() == "oauth" {
                 (
-                    "⚠️ login required",
-                    "Codex OAuth login has not been completed yet",
+                    "⚠️ login required".into(),
+                    "Codex OAuth login has not been completed yet".into(),
                 )
             } else {
-                ("❌ not configured", "OPENAI_API_KEY not set")
+                ("❌ not configured".into(), "OPENAI_API_KEY not set".into())
             };
 
             ProviderStatus {
                 summary,
                 reason,
                 switchable: false,
+            }
+        }
+        // New providers: generic status based on meta()
+        _ => {
+            let meta = provider.meta();
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/claude".to_string());
+            let status_file = format!("{}/.cloudcode/{}-status.json", home, provider.as_str());
+            let install_status = std::fs::read_to_string(&status_file).unwrap_or_default();
+
+            if install_status.contains("\"pending\"") || install_status.contains("\"installing\"") {
+                return ProviderStatus {
+                    summary: "⏳ installing".into(),
+                    reason: format!("{} CLI install is still in progress", meta.display_name),
+                    switchable: false,
+                };
+            }
+
+            if install_status.contains("\"failed\"") {
+                return ProviderStatus {
+                    summary: "❌ not installed".into(),
+                    reason: format!("{} CLI is not installed on the VPS yet", meta.display_name),
+                    switchable: false,
+                };
+            }
+
+            if provider_has_auth(provider) {
+                ProviderStatus {
+                    summary: "✅ ready".into(),
+                    reason: "configured".into(),
+                    switchable: true,
+                }
+            } else if !meta.stable {
+                ProviderStatus {
+                    summary: "⚠️ experimental".into(),
+                    reason: format!("{} headless auth is unconfirmed", meta.display_name),
+                    switchable: false,
+                }
+            } else {
+                ProviderStatus {
+                    summary: "❌ not configured".into(),
+                    reason: format!("{} auth not detected", meta.display_name),
+                    switchable: false,
+                }
             }
         }
     }

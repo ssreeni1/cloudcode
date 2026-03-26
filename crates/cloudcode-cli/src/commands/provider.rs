@@ -21,7 +21,6 @@ pub async fn run(provider: Option<String>) -> Result<()> {
                 DaemonResponse::Provider {
                     provider, has_auth, ..
                 } => {
-                    let other = if provider == "codex" { "claude" } else { "codex" };
                     let in_tui = std::env::var("NO_COLOR").is_ok();
                     let prefix = if in_tui { "/" } else { "cloudcode " };
                     let auth_status = if has_auth {
@@ -30,9 +29,14 @@ pub async fn run(provider: Option<String>) -> Result<()> {
                         "not authenticated".yellow().to_string()
                     };
                     println!("Current provider: {} ({})", provider.green(), auth_status);
+                    let others: Vec<&str> = AiProvider::ALL
+                        .iter()
+                        .map(|p| p.as_str())
+                        .filter(|p| *p != provider.as_str())
+                        .collect();
                     println!(
                         "{}",
-                        format!("Switch to {} with: {}provider {}", other, prefix, other).dimmed()
+                        format!("Switch with: {}provider <name> ({})", prefix, others.join(", ")).dimmed()
                     );
                 }
                 DaemonResponse::Error { message } => {
@@ -46,9 +50,7 @@ pub async fn run(provider: Option<String>) -> Result<()> {
         }
         Some(name) => {
             // Validate provider name
-            let _provider: AiProvider = name.parse().map_err(|_| {
-                anyhow::anyhow!("Unknown provider '{}'. Use 'claude' or 'codex'.", name)
-            })?;
+            let _provider: AiProvider = name.parse()?;
 
             // Switch via daemon API (no restart needed)
             let mut client = DaemonClient::connect(&state, &config)?;

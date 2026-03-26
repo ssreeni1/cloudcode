@@ -67,11 +67,11 @@ fn draw_welcome(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "    • Hetzner Cloud API token",
+            "    • Cloud provider (Hetzner)",
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "    • Claude authentication",
+            "    • AI agent (Claude, Codex, Amp, ...)",
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
@@ -124,7 +124,8 @@ fn draw_step(f: &mut Frame, app: &App, area: Rect) {
     draw_separator(f, layout[1]);
 
     match app.step {
-        WizardStep::Hetzner => draw_hetzner(f, app, layout[2]),
+        WizardStep::CloudProvider => draw_cloud_provider(f, app, layout[2]),
+        WizardStep::CloudToken => draw_hetzner(f, app, layout[2]),
         WizardStep::Provider => draw_provider(f, app, layout[2]),
         WizardStep::Claude => draw_claude(f, app, layout[2]),
         WizardStep::ClaudeApiKey => draw_claude_api_key(f, app, layout[2]),
@@ -191,7 +192,8 @@ fn draw_separator(f: &mut Frame, area: Rect) {
 
 fn draw_wizard_footer(f: &mut Frame, app: &App, area: Rect) {
     let help = match app.step {
-        WizardStep::Hetzner => "Enter: submit  ·  Esc: back",
+        WizardStep::CloudProvider => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
+        WizardStep::CloudToken => "Enter: submit  ·  Esc: back",
         WizardStep::Provider => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
         WizardStep::Claude => "↑↓: select  ·  Enter: confirm  ·  Esc: back",
         WizardStep::ClaudeApiKey => "Enter: submit  ·  Esc: back",
@@ -217,6 +219,33 @@ fn draw_wizard_footer(f: &mut Frame, app: &App, area: Rect) {
         ))),
         area,
     );
+}
+
+fn draw_cloud_provider(f: &mut Frame, _app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    // Only Hetzner is available for now (DigitalOcean coming soon)
+    let lines = vec![
+        Line::from(Span::styled(
+            "Which cloud provider do you want to use?",
+            Style::default().fg(Color::White),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("› ", Style::default().fg(BLUE).bold()),
+            Span::styled("● ", Style::default().fg(BLUE).bold()),
+            Span::styled("Hetzner Cloud", Style::default().fg(BLUE).bold()),
+            Span::styled(" — EU datacenter, cheapest VPS from $3.49/mo", Style::default().fg(DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(DIM)),
+            Span::styled("○ ", Style::default().fg(DIM)),
+            Span::styled("DigitalOcean", Style::default().fg(DIM)),
+            Span::styled(" — coming soon", Style::default().fg(DIM)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
 }
 
 fn draw_hetzner(f: &mut Frame, app: &App, area: Rect) {
@@ -292,11 +321,14 @@ fn draw_hetzner(f: &mut Frame, app: &App, area: Rect) {
 fn draw_provider(f: &mut Frame, app: &App, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
-    let options = ["Claude (Anthropic)", "Codex (OpenAI)", "Both"];
-    let descs = [
-        "Claude Code — Anthropic's coding agent",
-        "Codex CLI — OpenAI's coding agent",
-        "Configure both, choose default later",
+    let options: &[(&str, &str, bool)] = &[
+        ("Claude (Anthropic)", "Claude Code — Anthropic's coding agent", true),
+        ("Codex (OpenAI)", "Codex CLI — OpenAI's coding agent", true),
+        ("Amp (Sourcegraph)", "Amp — Sourcegraph's coding agent", false),
+        ("OpenCode", "OpenCode — open-source coding agent", false),
+        ("Pi", "Pi — lightweight coding agent", false),
+        ("Cursor", "Cursor CLI — Cursor's coding agent", false),
+        ("Both (Claude + Codex)", "Configure both, choose default later", true),
     ];
 
     let mut lines = vec![
@@ -307,21 +339,37 @@ fn draw_provider(f: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
     ];
 
-    for (i, (option, desc)) in options.iter().zip(descs.iter()).enumerate() {
+    for (i, (option, desc, stable)) in options.iter().enumerate() {
         let selected = i == app.provider_choice;
         let marker = if selected { "● " } else { "○ " };
         let prefix = if selected { "› " } else { "  " };
-        let style = if selected {
+
+        let base_style = if !stable {
+            // Beta providers are dimmer
+            if selected {
+                Style::default().fg(YELLOW).bold()
+            } else {
+                Style::default().fg(DIM)
+            }
+        } else if selected {
             Style::default().fg(BLUE).bold()
         } else {
             Style::default().fg(Color::White)
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(marker, style),
-            Span::styled(*option, style),
-            Span::styled(format!(" — {}", desc), Style::default().fg(DIM)),
-        ]));
+
+        let mut spans = vec![
+            Span::styled(prefix, base_style),
+            Span::styled(marker, base_style),
+            Span::styled(*option, base_style),
+        ];
+
+        if !stable {
+            spans.push(Span::styled(" (beta)", Style::default().fg(YELLOW)));
+        }
+
+        spans.push(Span::styled(format!(" — {}", desc), Style::default().fg(DIM)));
+
+        lines.push(Line::from(spans));
     }
 
     f.render_widget(Paragraph::new(Text::from(lines)), body);
@@ -908,9 +956,11 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 
     draw_separator(f, layout[1]);
 
-    // Body: server type picker, help reference, or console log
+    // Body: server type picker, health dashboard, help reference, or console log
     if app.server_type_picker.is_some() {
         draw_server_type_picker(f, app, layout[2]);
+    } else if app.show_health {
+        draw_health_dashboard(f, app, layout[2]);
     } else if app.show_help && app.log_lines.is_empty() && !app.is_command_running() {
         draw_command_reference(f, app, layout[2]);
     } else {
@@ -1173,6 +1223,97 @@ fn draw_server_type_picker(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn draw_health_dashboard(f: &mut Frame, app: &App, area: Rect) {
+    let body = area.inner(Margin::new(2, 1));
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Credential Health Dashboard",
+            Style::default().fg(BLUE).bold(),
+        )),
+        Line::from(""),
+        // Table header
+        Line::from(vec![
+            Span::styled(
+                format!("  {:<14} {:<12} {:<10} {:<8} {:<8}", "Provider", "Installed", "Version", "Auth", "Ready"),
+                Style::default().fg(Color::White).bold(),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!("  {}", "─".repeat(54)),
+            Style::default().fg(DIM),
+        )),
+    ];
+
+    // Use cached health data (populated when /health is invoked)
+    if let Some(ref statuses) = app.health_cache {
+        for status in statuses {
+            let (installed_str, installed_color) = if status.installed {
+                ("yes", GREEN)
+            } else if status.is_stable {
+                ("no", RED)
+            } else {
+                ("no", DIM)
+            };
+
+            let (auth_str, auth_color) = if status.authed {
+                ("yes", GREEN)
+            } else if status.installed {
+                ("no", YELLOW)
+            } else {
+                ("-", DIM)
+            };
+
+            let (ready_str, ready_color) = if status.ready {
+                ("yes", GREEN)
+            } else if status.installed && !status.authed {
+                ("no", YELLOW)
+            } else {
+                ("-", DIM)
+            };
+
+            let name_style = if !status.is_stable {
+                Style::default().fg(DIM)
+            } else if status.ready {
+                Style::default().fg(GREEN)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let beta_suffix = if status.is_stable { "" } else { " *" };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<14}", format!("{}{}", status.display_name, beta_suffix)),
+                    name_style,
+                ),
+                Span::styled(format!("{:<12}", installed_str), Style::default().fg(installed_color)),
+                Span::styled(format!("{:<10}", "-"), Style::default().fg(DIM)),
+                Span::styled(format!("{:<8}", auth_str), Style::default().fg(auth_color)),
+                Span::styled(format!("{:<8}", ready_str), Style::default().fg(ready_color)),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  Loading...",
+            Style::default().fg(DIM),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  * beta — headless auth not yet confirmed",
+        Style::default().fg(DIM),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Note: shows local machine state. VPS provider status requires /status.",
+        Style::default().fg(DIM),
+    )));
+
+    f.render_widget(Paragraph::new(Text::from(lines)), body);
+}
+
 fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
     let body = area.inner(Margin::new(2, 1));
 
@@ -1231,6 +1372,18 @@ fn draw_command_reference(f: &mut Frame, app: &App, area: Rect) {
         ("", "", "", ""),
         ("Other", "", "", ""),
         ("  /init", "", "Re-run setup wizard", "cloudcode init"),
+        (
+            "  /health",
+            "",
+            "Credential health dashboard",
+            "",
+        ),
+        (
+            "  /doctor",
+            "",
+            "Run diagnostic checks",
+            "cloudcode doctor",
+        ),
         ("  /help", "", "Show this reference", ""),
     ];
 

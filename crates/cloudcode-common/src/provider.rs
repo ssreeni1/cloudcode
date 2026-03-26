@@ -5,7 +5,121 @@ use serde::{Deserialize, Serialize};
 pub enum AiProvider {
     Claude,
     Codex,
+    Amp,
+    OpenCode,
+    Pi,
+    Cursor,
 }
+
+/// Static metadata for an AI provider — binary locations, auth detection,
+/// idle/prompt patterns for Telegram polling, and behavioral flags.
+pub struct ProviderMeta {
+    /// Binary name or path (e.g. "claude", "codex", "amp")
+    pub binary: &'static str,
+    /// Human-readable name
+    pub display_name: &'static str,
+    /// Shell command to install this provider
+    pub install_cmd: &'static str,
+    /// Shell command to check installed version
+    pub version_cmd: &'static str,
+    /// Auth credential files to check (relative to $HOME). ANY existing = authed.
+    pub auth_files: &'static [&'static str],
+    /// Env vars that indicate auth is configured. ANY set = authed.
+    pub auth_env_vars: &'static [&'static str],
+    /// Whether this provider's headless auth is confirmed working
+    pub stable: bool,
+    /// Strings that indicate the provider is idle (ready for input).
+    /// Used by question_poller to detect when the provider finished working.
+    pub idle_patterns: &'static [&'static str],
+    /// Strings that indicate a startup/prompt screen (not a question).
+    /// Used by question_poller to avoid false-positive question detection.
+    pub prompt_patterns: &'static [&'static str],
+    /// Whether echoing Telegram messages into the tmux pane is safe.
+    /// False for providers whose TUI gets confused by injected text.
+    pub supports_bridge_echo: bool,
+}
+
+static CLAUDE_META: ProviderMeta = ProviderMeta {
+    binary: "claude",
+    display_name: "Claude",
+    install_cmd: "curl -fsSL https://claude.ai/install.sh | sh",
+    version_cmd: "claude --version",
+    auth_files: &[".claude/.credentials.json"],
+    auth_env_vars: &["ANTHROPIC_API_KEY"],
+    stable: true,
+    idle_patterns: &["❯", "❯ "],
+    prompt_patterns: &[
+        "bypass permissions",
+        "shift+tab to cycle",
+        "Claude Code v",
+    ],
+    supports_bridge_echo: true,
+};
+
+static CODEX_META: ProviderMeta = ProviderMeta {
+    binary: "codex",
+    display_name: "Codex",
+    install_cmd: "npm install -g @openai/codex",
+    version_cmd: "codex --version",
+    auth_files: &[".codex/auth.json"],
+    auth_env_vars: &["OPENAI_API_KEY"],
+    stable: true,
+    idle_patterns: &["›"],
+    prompt_patterns: &["gpt-5.4", "% left ·"],
+    supports_bridge_echo: false,
+};
+
+static AMP_META: ProviderMeta = ProviderMeta {
+    binary: "amp",
+    display_name: "Amp",
+    install_cmd: "npm install -g @sourcegraph/amp",
+    version_cmd: "amp --version",
+    auth_files: &[".config/amp/settings.json"],
+    auth_env_vars: &["AMP_API_KEY"],
+    stable: true,
+    idle_patterns: &["⚡", "⚡ "],
+    prompt_patterns: &["Amp v", "amp ready"],
+    supports_bridge_echo: true,
+};
+
+static OPENCODE_META: ProviderMeta = ProviderMeta {
+    binary: "opencode",
+    display_name: "OpenCode",
+    install_cmd: "curl -fsSL https://opencode.ai/install | bash",
+    version_cmd: "opencode --version",
+    auth_files: &[".local/share/opencode/auth.json"],
+    auth_env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+    stable: true,
+    idle_patterns: &["opencode>", "opencode> "],
+    prompt_patterns: &["OpenCode v", "opencode ready"],
+    supports_bridge_echo: true,
+};
+
+static PI_META: ProviderMeta = ProviderMeta {
+    binary: "pi",
+    display_name: "Pi",
+    install_cmd: "npm install -g @mariozechner/pi-coding-agent",
+    version_cmd: "pi --version",
+    auth_files: &[".config/pi/credentials.json"],
+    auth_env_vars: &["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+    stable: true,
+    idle_patterns: &["λ", "λ "],
+    prompt_patterns: &["Pi v", "pi ready"],
+    supports_bridge_echo: true,
+};
+
+static CURSOR_META: ProviderMeta = ProviderMeta {
+    binary: "cursor-agent",
+    display_name: "Cursor",
+    install_cmd: "curl -fsSL https://cursor.com/install | bash",
+    version_cmd: "cursor-agent --version",
+    auth_files: &[".config/cursor/auth.json"],
+    auth_env_vars: &["CURSOR_API_KEY"],
+    stable: true,
+    idle_patterns: &["▶", "▶ "],
+    prompt_patterns: &["Cursor v", "cursor ready"],
+    supports_bridge_echo: false,
+};
 
 impl Default for AiProvider {
     fn default() -> Self {
@@ -14,10 +128,24 @@ impl Default for AiProvider {
 }
 
 impl AiProvider {
+    /// All known provider variants.
+    pub const ALL: &'static [AiProvider] = &[
+        AiProvider::Claude,
+        AiProvider::Codex,
+        AiProvider::Amp,
+        AiProvider::OpenCode,
+        AiProvider::Pi,
+        AiProvider::Cursor,
+    ];
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Amp => "amp",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -25,6 +153,141 @@ impl AiProvider {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Amp => "Amp",
+            Self::OpenCode => "OpenCode",
+            Self::Pi => "Pi",
+            Self::Cursor => "Cursor",
+        }
+    }
+
+    /// Static metadata for this provider.
+    pub fn meta(&self) -> &'static ProviderMeta {
+        match self {
+            Self::Claude => &CLAUDE_META,
+            Self::Codex => &CODEX_META,
+            Self::Amp => &AMP_META,
+            Self::OpenCode => &OPENCODE_META,
+            Self::Pi => &PI_META,
+            Self::Cursor => &CURSOR_META,
+        }
+    }
+
+    /// Resolve the absolute path for this provider's binary on the VPS.
+    ///
+    /// Checks `~/.local/bin/<binary>` first (curl/pip installers), then
+    /// `/usr/local/bin/<binary>` (npm -g installs).  Falls back to just the
+    /// bare binary name so the shell's PATH can still find it.
+    pub fn resolve_bin(&self, home: &str) -> String {
+        let binary = self.meta().binary;
+        let local = format!("{home}/.local/bin/{binary}");
+        let global = format!("/usr/local/bin/{binary}");
+        // At spawn-command build time we can't stat the remote FS, so we
+        // emit a small shell snippet that picks the first existing path.
+        // This makes the tmux command resilient to the binary living in
+        // either location.
+        format!(
+            "$(if [ -x {local} ]; then echo {local}; elif [ -x {global} ]; then echo {global}; else echo {binary}; fi)"
+        )
+    }
+
+    /// Shell snippet that discovers and exports existing auth credentials
+    /// from other providers. Runs before the provider binary starts.
+    ///
+    /// Cross-pollination rules:
+    /// - Claude OAuth (`~/.claude/.credentials.json`) → extracts `ANTHROPIC_API_KEY` for Pi, OpenCode
+    /// - Codex OAuth (`~/.codex/auth.json`) → extracts `OPENAI_API_KEY` for Pi, OpenCode
+    /// - Env file vars are already inherited via systemd EnvironmentFile
+    fn auth_proxy_snippet(home: &str) -> String {
+        format!(
+            r#"# --- cloudcode auth proxy: share credentials across providers ---
+if [ -z "$ANTHROPIC_API_KEY" ] && [ -f {home}/.claude/.credentials.json ]; then
+  _KEY=$(python3 -c "import json; d=json.load(open('{home}/.claude/.credentials.json')); print(d.get('claudeAiOauth',{{}}).get('accessToken',''))" 2>/dev/null)
+  [ -n "$_KEY" ] && export ANTHROPIC_API_KEY="$_KEY" && echo '[cloudcode] Using Claude OAuth token for authentication'
+fi
+if [ -z "$OPENAI_API_KEY" ] && [ -f {home}/.codex/auth.json ]; then
+  _KEY=$(python3 -c "import json; d=json.load(open('{home}/.codex/auth.json')); print(d.get('token','') or d.get('access_token',''))" 2>/dev/null)
+  [ -n "$_KEY" ] && export OPENAI_API_KEY="$_KEY" && echo '[cloudcode] Using Codex OAuth token for authentication'
+fi
+# --- end auth proxy ---
+"#
+        )
+    }
+
+    /// Build the shell command to spawn this provider in a tmux session.
+    ///
+    /// `home` is the $HOME directory on the remote VPS (e.g. "/home/claude").
+    pub fn spawn_command(&self, home: &str) -> String {
+        let bin = self.resolve_bin(home);
+        let name = self.display_name();
+        // Providers that benefit from cross-provider auth get the proxy snippet
+        let auth = match self {
+            Self::Claude | Self::Codex => String::new(), // handle their own auth
+            _ => Self::auth_proxy_snippet(home),
+        };
+        match self {
+            Self::Claude => {
+                format!(
+                    "while true; do {bin} --dangerously-skip-permissions --permission-mode bypassPermissions; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            Self::Codex => {
+                format!(
+                    "if ! {bin} login status >/dev/null 2>&1; then \
+                       echo '[cloudcode] {name} needs authentication. Starting device auth flow...'; \
+                       {bin} login --device-auth; \
+                     fi; \
+                     while true; do {bin} --add-dir {home}/.cloudcode/contexts; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            Self::Amp => {
+                // Amp: --no-notifications only. Do NOT use --dangerously-allow-all
+                // (it triggers execute mode which requires stdin message).
+                // Amp needs `amp login` first — shows a URL the user opens in any browser.
+                format!(
+                    "{auth}if ! {bin} threads list >/dev/null 2>&1; then \
+                       echo '[cloudcode] {name} needs authentication. Run: amp login'; \
+                       {bin} login; \
+                     fi; \
+                     while true; do {bin} --no-notifications; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            Self::Cursor => {
+                format!(
+                    "{auth}while true; do {bin} --model auto --yolo; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            Self::Pi => {
+                // Pi uses ANTHROPIC_API_KEY from the auth proxy. If no key is
+                // available, tell the user to log into Claude first (Pi's own
+                // OAuth redirects to localhost which doesn't work on a VPS).
+                format!(
+                    "{auth}if [ -z \"$ANTHROPIC_API_KEY\" ] && [ -z \"$OPENAI_API_KEY\" ]; then \
+                       echo '[cloudcode] Pi needs an API key. Log into Claude or Codex first,'; \
+                       echo '  then Pi will use those credentials automatically.'; \
+                       echo '  Run: /provider claude, /open <session>, complete login, then try Pi again.'; \
+                       sleep 10; exit 1; \
+                     fi; \
+                     while true; do {bin}; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
+            _ => {
+                // OpenCode: plain interactive TUI
+                format!(
+                    "{auth}while true; do {bin}; \
+                     echo '\\n[cloudcode] {name} exited. Restarting in 3s... (Ctrl-C to stop)'; \
+                     sleep 3; done"
+                )
+            }
         }
     }
 }
@@ -42,7 +305,14 @@ impl std::str::FromStr for AiProvider {
         match s.trim().to_lowercase().as_str() {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
-            _ => anyhow::bail!("Unknown provider '{}'. Valid: claude, codex", s),
+            "amp" => Ok(Self::Amp),
+            "opencode" | "open_code" | "open-code" => Ok(Self::OpenCode),
+            "pi" => Ok(Self::Pi),
+            "cursor" => Ok(Self::Cursor),
+            _ => anyhow::bail!(
+                "Unknown provider '{}'. Valid: claude, codex, amp, opencode, pi, cursor",
+                s
+            ),
         }
     }
 }
@@ -60,6 +330,21 @@ mod tests {
     fn parses_case_insensitively() {
         assert_eq!("claude".parse::<AiProvider>().unwrap(), AiProvider::Claude);
         assert_eq!("CODEX".parse::<AiProvider>().unwrap(), AiProvider::Codex);
+        assert_eq!("Amp".parse::<AiProvider>().unwrap(), AiProvider::Amp);
+        assert_eq!(
+            "OpenCode".parse::<AiProvider>().unwrap(),
+            AiProvider::OpenCode
+        );
+        assert_eq!(
+            "open_code".parse::<AiProvider>().unwrap(),
+            AiProvider::OpenCode
+        );
+        assert_eq!(
+            "open-code".parse::<AiProvider>().unwrap(),
+            AiProvider::OpenCode
+        );
+        assert_eq!("PI".parse::<AiProvider>().unwrap(), AiProvider::Pi);
+        assert_eq!("cursor".parse::<AiProvider>().unwrap(), AiProvider::Cursor);
         assert!("other".parse::<AiProvider>().is_err());
     }
 
@@ -73,5 +358,148 @@ mod tests {
             serde_json::to_string(&AiProvider::Codex).unwrap(),
             "\"codex\""
         );
+        assert_eq!(
+            serde_json::to_string(&AiProvider::Amp).unwrap(),
+            "\"amp\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AiProvider::OpenCode).unwrap(),
+            "\"open_code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AiProvider::Pi).unwrap(),
+            "\"pi\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AiProvider::Cursor).unwrap(),
+            "\"cursor\""
+        );
+    }
+
+    #[test]
+    fn deserializes_all_variants() {
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"claude\"").unwrap(),
+            AiProvider::Claude
+        );
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"codex\"").unwrap(),
+            AiProvider::Codex
+        );
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"amp\"").unwrap(),
+            AiProvider::Amp
+        );
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"open_code\"").unwrap(),
+            AiProvider::OpenCode
+        );
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"pi\"").unwrap(),
+            AiProvider::Pi
+        );
+        assert_eq!(
+            serde_json::from_str::<AiProvider>("\"cursor\"").unwrap(),
+            AiProvider::Cursor
+        );
+    }
+
+    #[test]
+    fn serde_roundtrip_all_variants() {
+        for &provider in AiProvider::ALL {
+            let json = serde_json::to_string(&provider).unwrap();
+            let parsed: AiProvider = serde_json::from_str(&json).unwrap();
+            assert_eq!(provider, parsed, "roundtrip failed for {:?}", provider);
+        }
+    }
+
+    #[test]
+    fn as_str_roundtrip() {
+        for &provider in AiProvider::ALL {
+            let s = provider.as_str();
+            let parsed: AiProvider = s.parse().unwrap();
+            assert_eq!(provider, parsed, "as_str roundtrip failed for {:?}", provider);
+        }
+    }
+
+    #[test]
+    fn display_name_is_nonempty() {
+        for &provider in AiProvider::ALL {
+            assert!(!provider.display_name().is_empty());
+        }
+    }
+
+    #[test]
+    fn meta_binary_is_correct() {
+        assert_eq!(AiProvider::Claude.meta().binary, "claude");
+        assert_eq!(AiProvider::Codex.meta().binary, "codex");
+        assert_eq!(AiProvider::Amp.meta().binary, "amp");
+        assert_eq!(AiProvider::OpenCode.meta().binary, "opencode");
+        assert_eq!(AiProvider::Pi.meta().binary, "pi");
+        // Cursor CLI binary is "cursor-agent", not "cursor"
+        assert_eq!(AiProvider::Cursor.meta().binary, "cursor-agent");
+    }
+
+    #[test]
+    fn meta_auth_files_nonempty() {
+        for &provider in AiProvider::ALL {
+            let meta = provider.meta();
+            assert!(
+                !meta.auth_files.is_empty() || !meta.auth_env_vars.is_empty(),
+                "{:?} has no auth detection",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn meta_idle_patterns_nonempty() {
+        for &provider in AiProvider::ALL {
+            assert!(
+                !provider.meta().idle_patterns.is_empty(),
+                "{:?} has no idle patterns",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn all_providers_stable() {
+        for &provider in AiProvider::ALL {
+            assert!(
+                provider.meta().stable,
+                "{:?} should be stable",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_command_contains_binary() {
+        let home = "/home/claude";
+        for &provider in AiProvider::ALL {
+            let cmd = provider.spawn_command(home);
+            assert!(
+                cmd.contains(provider.meta().binary),
+                "{:?} spawn_command doesn't contain binary name",
+                provider
+            );
+            assert!(
+                cmd.contains("Restarting in 3s"),
+                "{:?} spawn_command missing restart loop",
+                provider
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_echo_per_provider() {
+        assert!(AiProvider::Claude.meta().supports_bridge_echo);
+        assert!(!AiProvider::Codex.meta().supports_bridge_echo);
+    }
+
+    #[test]
+    fn all_variants_count() {
+        assert_eq!(AiProvider::ALL.len(), 6);
     }
 }

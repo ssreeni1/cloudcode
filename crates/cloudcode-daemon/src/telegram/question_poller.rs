@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
+use cloudcode_common::provider::AiProvider;
+
 use super::sender::TelegramSender;
 use crate::session::manager::SessionManager;
 
@@ -121,6 +123,29 @@ fn content_hash(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Check if a trimmed line matches any idle or prompt pattern for the given provider.
+fn is_provider_idle_or_prompt_line(trimmed: &str, provider: AiProvider) -> bool {
+    let meta = provider.meta();
+    // Exact match against idle patterns (e.g. "❯", "›")
+    for pat in meta.idle_patterns {
+        if trimmed == *pat {
+            return true;
+        }
+    }
+    // Contains-match against prompt patterns (e.g. "bypass permissions", "gpt-5.4")
+    for pat in meta.prompt_patterns {
+        if trimmed.contains(pat) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if a trimmed line matches the active provider's idle or prompt pattern.
+fn is_provider_noise_line(trimmed: &str, provider: AiProvider) -> bool {
+    is_provider_idle_or_prompt_line(trimmed, provider)
 }
 
 /// Run the background poller that watches tmux sessions for questions.
@@ -287,9 +312,10 @@ pub async fn run_poller(
                         } else {
                             escaped_question
                         };
+                        let provider = session_mgr.session_provider(&session.name);
                         let msg = format!(
-                            "\u{1f514} <b>[{}]</b> Claude is waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt; or /type {} &lt;text&gt;",
-                            session.name, truncated, session.name, session.name
+                            "\u{1f514} <b>[{}]</b> {} is waiting for input:\n\n<pre>{}</pre>\n\nUse /reply {} &lt;text&gt; or /type {} &lt;text&gt;",
+                            session.name, provider.meta().display_name, truncated, session.name, session.name
                         );
                         // Message is guaranteed to fit in one chunk, but send_html
                         // handles chunking safely for plain text fallback
@@ -312,6 +338,7 @@ pub async fn run_poller(
                 stream_entry.2 = stream_entry.2.saturating_add(1);
 
                 // Check if the pane looks like startup/idle (not real work)
+                let provider = session_mgr.session_provider(&session.name);
                 let is_startup_or_idle = {
                     let recent: Vec<&str> = content
                         .lines()
@@ -323,26 +350,17 @@ pub async fn run_poller(
                     // this is startup or idle — not real AI work
                     recent.iter().all(|line| {
                         let t = line.trim();
-                        t == "❯" || t == "❯ " || t == "›"
-                            || t.contains("bypass permissions")
-                            || t.contains("shift+tab to cycle")
-                            || t.contains("% left ·")
-                            || t.contains("gpt-5.4")
+                        is_provider_idle_or_prompt_line(t, provider)
                             || t.starts_with("───")
                             || t.starts_with("━━━")
-                            || t.contains("Claude Code v")
                             || t.contains("Opus 4")
                             || t.contains("Claude Max")
                             || t.contains("Voice mode")
                             || t.starts_with("▐▛") || t.starts_with("▝▜") || t.starts_with("▘▘")
                             || t.contains("cloudcode/sessions/")
                             || t.contains("medium · /effort")
-                            || t.contains("npm to native")
-                            || t.contains("claude install")
-                            || t.contains("OpenAI Codex")
                             || t.starts_with("╭") || t.starts_with("│") || t.starts_with("╰")
                             || t.starts_with("Tip:")
-                            || t.starts_with("› ")
                     })
                 };
 
@@ -377,7 +395,7 @@ pub async fn run_poller(
                                 !t.is_empty()
                                     && !t.starts_with("───")
                                     && !t.starts_with("━━━")
-                                    && !t.contains("bypass permissions")
+                                    && !is_provider_noise_line(t, provider)
                             })
                             .collect()
                     } else {
@@ -417,22 +435,11 @@ pub async fn run_poller(
                     .take(5)
                     .collect();
 
+                let session_provider = session_mgr.session_provider(&session.name);
                 let is_idle = recent_lines.iter().any(|line| {
                     let t = line.trim();
-                    // Claude Code idle indicators
-                    t == ">"
-                        || t == "❯"
-                        || t == "❯ "
-                        || t.contains("bypass permissions")
-                        || t.contains("shift+tab to cycle")
-                        || t.contains("npm to native")
-                        || t.contains("claude install")
-                        // Codex idle indicators
-                        || t == "›"
-                        || t.starts_with("› ")
-                        || t.contains("% left ·")
-                        || t.contains("gpt-5.4")
-                        // Shell prompt
+                    is_provider_idle_or_prompt_line(t, session_provider)
+                        // Shell prompt (provider-agnostic)
                         || t.ends_with("$ ")
                         || t == "$"
                 });
@@ -449,14 +456,19 @@ pub async fn run_poller(
                     // Also grab lines that are continuations (indented).
                     let all_lines: Vec<&str> = content.lines().collect();
 
-                    // Find the last real user prompt (❯ or ›),
-                    // skipping Codex suggestion lines.
+                    // Find the last real user prompt (idle pattern + text),
+                    // skipping suggestion lines.
+                    let idle_pats = session_provider.meta().idle_patterns;
                     let response_start = all_lines
                         .iter()
                         .rposition(|l| {
                             let t = l.trim();
-                            (t.starts_with("❯ ") || t.starts_with("› "))
-                                && t.len() > 2
+                            // Line starts with an idle pattern followed by user text
+                            let starts_with_prompt = idle_pats.iter().any(|pat| {
+                                let pat_trimmed = pat.trim();
+                                t.starts_with(pat_trimmed) && t.len() > pat_trimmed.len()
+                            });
+                            starts_with_prompt
                                 // Skip suggestion lines (grayed out prompts)
                                 && !t.contains("Summarize")
                                 && !t.contains("Improve")
@@ -477,14 +489,7 @@ pub async fn run_poller(
                         .filter(|l| {
                             let t = l.trim();
                             !t.is_empty()
-                                && t != ">"
-                                && t != "❯"
-                                && t != "›"
-                                && !t.starts_with("› ")
-                                && !t.contains("bypass permissions")
-                                && !t.contains("shift+tab to cycle")
-                                && !t.contains("% left ·")
-                                && !t.contains("gpt-5.4")
+                                && !is_provider_noise_line(t, session_provider)
                                 && !t.starts_with("───")
                                 && !t.starts_with("━━━")
                                 && !t.contains("cloudcode/sessions/")
